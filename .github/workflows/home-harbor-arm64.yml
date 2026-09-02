@@ -1,0 +1,83 @@
+name: Home Harbor ARM64 Images
+
+on:
+  push:
+    branches:
+      - mkl
+
+permissions:
+  contents: read
+
+concurrency:
+  group: home-harbor-arm64-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  HARBOR_REGISTRY: dcr.home.lan.mkl.dev
+  IMAGE_TAG: mkl-${{ github.sha }}
+
+jobs:
+  build-and-push:
+    name: Build and push ARM64 images
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 180
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Log in to home Harbor
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3.7.0
+        with:
+          registry: ${{ env.HARBOR_REGISTRY }}
+          username: ${{ secrets.HARBOR_CI_USERNAME }}
+          password: ${{ secrets.HARBOR_CI_TOKEN }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
+
+      - name: Build and push gateway
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2
+        with:
+          context: .
+          platforms: linux/arm64
+          push: true
+          build-args: |
+            VERSION=${{ env.IMAGE_TAG }}
+            GIT_REVISION=${{ github.sha }}
+            CARGO_BUILD_JOBS=2
+            CARGO_PROFILE_RELEASE_LTO=false
+            CARGO_PROFILE_RELEASE_CODEGEN_UNITS=16
+          tags: |
+            ${{ env.HARBOR_REGISTRY }}/library/agentgateway:${{ env.IMAGE_TAG }}
+            ${{ env.HARBOR_REGISTRY }}/library/agentgateway:mkl-latest
+
+      - name: Set up Go
+        uses: actions/setup-go@4b73464bb391d4059bd26b0524d20df3927bd417 # v6.3.0
+        with:
+          go-version: "1.27.0"
+          cache-dependency-path: controller/go.sum
+
+      - name: Build ARM64 controller binary
+        working-directory: controller
+        run: |
+          set -euo pipefail
+          mkdir -p _output/pkg/agentgateway
+          CGO_ENABLED=0 GOARCH=arm64 GOOS=linux go build \
+            -ldflags="-X github.com/agentgateway/agentgateway/controller/pkg/version.Version=${IMAGE_TAG} -s -w" \
+            -o _output/pkg/agentgateway/agentgateway-linux-arm64 \
+            ./cmd/agentgateway
+          cp cmd/agentgateway/Dockerfile.agentgateway _output/pkg/agentgateway/
+
+      - name: Build and push controller
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2
+        with:
+          context: controller/_output/pkg/agentgateway
+          file: controller/_output/pkg/agentgateway/Dockerfile.agentgateway
+          platforms: linux/arm64
+          push: true
+          build-args: GOARCH=arm64
+          tags: |
+            ${{ env.HARBOR_REGISTRY }}/library/agentgateway-controller:${{ env.IMAGE_TAG }}
+            ${{ env.HARBOR_REGISTRY }}/library/agentgateway-controller:mkl-latest
