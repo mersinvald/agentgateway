@@ -4,7 +4,9 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
+	"google.golang.org/protobuf/types/known/durationpb"
 	"istio.io/istio/pilot/pkg/model/kstatus"
 	"istio.io/istio/pkg/config"
 	"istio.io/istio/pkg/kube/controllers"
@@ -441,7 +443,14 @@ func TranslateBackendPolicies(
 	if policies == nil {
 		return nil, nil
 	}
-	return plugins.TranslateInlineBackendPolicy(ctx, namespace, policies)
+	translated, err := plugins.TranslateInlineBackendPolicy(ctx, namespace, policies)
+	if err != nil {
+		return nil, err
+	}
+	if policies.CodexSubscriptionAuth != nil {
+		translated = append(translated, translateCodexSubscriptionAuth(policies.CodexSubscriptionAuth))
+	}
+	return translated, nil
 }
 
 func translateAIBackendPolicies(
@@ -452,11 +461,21 @@ func translateAIBackendPolicies(
 		return nil, nil
 	}
 	return TranslateBackendPolicies(ctx, namespace, &agentgateway.BackendFull{
-		BackendSimple:  policies.BackendSimple,
-		AI:             policies.AI,
-		Transformation: policies.Transformation,
-		Health:         policies.Health,
+		BackendSimple:         policies.BackendSimple,
+		CodexSubscriptionAuth: policies.CodexSubscriptionAuth,
+		AI:                    policies.AI,
+		Transformation:        policies.Transformation,
+		Health:                policies.Health,
 	})
+}
+
+func translateCodexSubscriptionAuth(auth *agentgateway.CodexSubscriptionAuth) *api.BackendPolicySpec {
+	return &api.BackendPolicySpec{
+		Kind: &api.BackendPolicySpec_CodexSubscriptionAuth_{CodexSubscriptionAuth: &api.BackendPolicySpec_CodexSubscriptionAuth{
+			CredentialId: auth.CredentialRef.ID,
+			Generation:   auth.CredentialRef.Generation,
+		}},
+	}
 }
 
 func translateLLMProvider(ctx plugins.PolicyCtx, namespace string, llm *agentgateway.LLMProvider, providerName string) (*api.AIBackend_Provider, error) {
@@ -489,6 +508,42 @@ func translateLLMProvider(ctx plugins.PolicyCtx, namespace string, llm *agentgat
 			Openai: &api.AIBackend_OpenAI{
 				Model:      llm.OpenAI.Model,
 				Moderation: moderation,
+			},
+		}
+	} else if llm.CodexSubscription != nil {
+		catalog := llm.CodexSubscription.Catalog
+		refreshInterval := durationpb.New(5 * time.Minute)
+		staleWhileRevalidate := durationpb.New(time.Hour)
+		if catalog != nil {
+			if catalog.RefreshInterval != nil {
+				refreshInterval = durationpb.New(catalog.RefreshInterval.Duration)
+			}
+			if catalog.StaleWhileRevalidate != nil {
+				staleWhileRevalidate = durationpb.New(catalog.StaleWhileRevalidate.Duration)
+			}
+		}
+		allow := []string{"*"}
+		deny := []string(nil)
+		if models := llm.CodexSubscription.Models; models != nil {
+			if models.Allow != nil {
+				allow = make([]string, len(models.Allow))
+				for i, model := range models.Allow {
+					allow[i] = string(model)
+				}
+			}
+			if models.Deny != nil {
+				deny = make([]string, len(models.Deny))
+				for i, model := range models.Deny {
+					deny[i] = string(model)
+				}
+			}
+		}
+		provider.Provider = &api.AIBackend_Provider_CodexSubscription{
+			CodexSubscription: &api.AIBackend_CodexSubscription{
+				RefreshInterval:      refreshInterval,
+				StaleWhileRevalidate: staleWhileRevalidate,
+				AllowModels:          allow,
+				DenyModels:           deny,
 			},
 		}
 	} else if llm.AzureOpenAI != nil {

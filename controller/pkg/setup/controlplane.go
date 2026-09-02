@@ -13,10 +13,13 @@ import (
 	grpc_zap "github.com/grpc-ecosystem/go-grpc-middleware/logging/zap"
 	"go.uber.org/zap"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/reflection"
+	"google.golang.org/grpc/status"
 	"istio.io/istio/pkg/security"
 
+	api "github.com/agentgateway/agentgateway/api"
 	"github.com/agentgateway/agentgateway/controller/pkg/metrics"
 	"github.com/agentgateway/agentgateway/controller/pkg/syncer/krtxds"
 	"github.com/agentgateway/agentgateway/controller/pkg/syncer/nack"
@@ -60,6 +63,7 @@ func runXDSServer(
 	xdsAuth bool,
 	certProvider certificateProvider,
 	nackPublisher *nack.Publisher,
+	credentialStore *codexCredentialStore,
 	reg ...krtxds.Registration,
 ) {
 	baseLogger := slog.Default().With("component", "agentgateway-controlplane")
@@ -76,6 +80,9 @@ func runXDSServer(
 
 	reflection.Register(grpcServer)
 	envoy_service_discovery_v3.RegisterAggregatedDiscoveryServiceServer(grpcServer, ds)
+	if credentialStore != nil {
+		api.RegisterCodexCredentialServiceServer(grpcServer, credentialStore)
+	}
 
 	baseLogger.Info("starting server", "address", lis.Addr().String())
 	go grpcServer.Serve(lis)
@@ -94,6 +101,16 @@ func getGRPCServerOpts(
 ) []grpc.ServerOption {
 	opts := []grpc.ServerOption{
 		grpc.MaxRecvMsgSize(math.MaxInt32),
+		grpc.UnaryInterceptor(func(ctx context.Context, req any, _ *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (any, error) {
+			if !xdsAuth {
+				return handler(ctx, req)
+			}
+			am := authenticationManager{Authenticators: authenticators}
+			if caller := am.authenticate(ctx); caller != nil {
+				return handler(context.WithValue(ctx, krtxds.PeerCtxKey, caller), req)
+			}
+			return nil, status.Error(codes.Unauthenticated, "authentication failed")
+		}),
 		grpc.StreamInterceptor(
 			grpc_middleware.ChainStreamServer(
 				grpc_zap.StreamServerInterceptor(zap.NewNop()),

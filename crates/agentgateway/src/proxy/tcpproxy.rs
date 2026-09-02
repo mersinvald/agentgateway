@@ -989,6 +989,8 @@ mod tests {
 				Default::default(),
 			)),
 			model_catalog: ModelCatalog::empty(),
+			codex_catalog: Arc::new(crate::llm::codex_catalog::Cache::default()),
+			codex_oauth: Arc::new(crate::llm::codex_oauth::Manager::unavailable()),
 			admin: None,
 			upstream: client,
 			ca: None,

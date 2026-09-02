@@ -3,7 +3,7 @@ use std::net::SocketAddr;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
-use std::time::Instant;
+use std::time::{Duration, Instant, SystemTime};
 
 use agent_core::drain::{DrainTrigger, DrainWatcher};
 use agent_core::strng::Strng;
@@ -16,6 +16,7 @@ use hyper_util::rt::{TokioExecutor, TokioIo, TokioTimer};
 use itertools::Itertools;
 use prometheus_client::registry::Registry;
 use rustls_pki_types::ServerName;
+use secrecy::SecretString;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio::io::DuplexStream;
@@ -47,6 +48,39 @@ use crate::types::loadbalancer::EndpointSet;
 use crate::types::local::LocalNamedAIProvider;
 use crate::types::{frontend, local};
 use crate::{ProxyInputs, client, mcp};
+
+struct TestCodexCredentialStore(crate::llm::codex_oauth::Credential);
+
+#[async_trait::async_trait]
+impl crate::llm::codex_oauth::CredentialStore for TestCodexCredentialStore {
+	async fn load(
+		&self,
+	) -> Result<Option<crate::llm::codex_oauth::Credential>, crate::llm::codex_oauth::OAuthError> {
+		Ok(Some(self.0.clone()))
+	}
+
+	async fn replace(
+		&self,
+		_credential: crate::llm::codex_oauth::Credential,
+	) -> Result<(), crate::llm::codex_oauth::OAuthError> {
+		Ok(())
+	}
+}
+
+fn test_codex_oauth_manager() -> crate::llm::codex_oauth::Manager {
+	crate::llm::codex_oauth::Manager::new(
+		Arc::new(crate::llm::codex_oauth::HttpTokenEndpoint::new()),
+		Arc::new(TestCodexCredentialStore(
+			crate::llm::codex_oauth::Credential {
+				access_token: SecretString::from("test-codex-access-token"),
+				refresh_token: SecretString::from("test-codex-refresh-token"),
+				expires_at: SystemTime::now() + Duration::from_secs(60 * 60),
+				account_id: Some("test-codex-account-id".into()),
+				residency: Some("test-codex-residency".into()),
+			},
+		)),
+	)
+}
 
 // Copied from examples/mcp-tls/certs/ca-cert.pem.
 const MOCK_TLS_CA_CERT: &[u8] = b"-----BEGIN CERTIFICATE-----\n\
@@ -1388,6 +1422,8 @@ pub fn setup_proxy_test_with_config_and_spiffe(
 			histogram_mode,
 		)),
 		model_catalog: catalog::ModelCatalog::empty(),
+		codex_catalog: Arc::new(crate::llm::codex_catalog::Cache::default()),
+		codex_oauth: Arc::new(test_codex_oauth_manager()),
 		admin: None,
 		upstream: client.clone(),
 		ca: None,

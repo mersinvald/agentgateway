@@ -212,7 +212,7 @@ type NamedLLMProvider struct {
 }
 
 // Large language model provider that the backend routes requests to.
-// +kubebuilder:validation:ExactlyOneOf=openai;azureopenai;azure;anthropic;gemini;vertexai;bedrock;custom
+// +kubebuilder:validation:ExactlyOneOf=openai;azureopenai;azure;anthropic;gemini;vertexai;bedrock;custom;codexSubscription
 // +kubebuilder:validation:XValidation:rule="has(self.host) || has(self.port) ? has(self.host) && has(self.port) : true",message="both host and port must be set together"
 // +kubebuilder:validation:XValidation:rule="has(self.custom) ? has(self.custom.backendRef) != has(self.host) : true",message="custom providers must specify exactly one of backendRef or host and port"
 // +kubebuilder:validation:XValidation:rule="!(has(self.path) && has(self.pathPrefix))",message="path and pathPrefix are mutually exclusive"
@@ -255,6 +255,12 @@ type LLMProvider struct {
 	// +optional
 	Custom *CustomProvider `json:"custom,omitempty"`
 
+	// CodexSubscription uses a shared ChatGPT subscription credential and its
+	// authenticated upstream catalog. The client request always supplies the
+	// model ID; no static Codex model list or model override is configured here.
+	// +optional
+	CodexSubscription *CodexSubscriptionConfig `json:"codexSubscription,omitempty"`
+
 	// Hostname to send requests to.
 	// For custom providers without backendRef, host and port specify the target.
 	// For managed providers, host and port override the provider default.
@@ -279,6 +285,46 @@ type LLMProvider struct {
 	// Only supported for OpenAI and Anthropic providers.
 	// +optional
 	PathPrefix LongString `json:"pathPrefix,omitempty"`
+}
+
+// Codex subscription provider catalog and local model policy settings.
+// +kubebuilder:validation:XValidation:rule="!has(self.catalog) || !has(self.catalog.refreshInterval) || duration(self.catalog.refreshInterval) >= duration('1s')",message="catalog.refreshInterval must be at least 1 second"
+// +kubebuilder:validation:XValidation:rule="!has(self.catalog) || !has(self.catalog.staleWhileRevalidate) || duration(self.catalog.staleWhileRevalidate) >= duration('1s')",message="catalog.staleWhileRevalidate must be at least 1 second"
+type CodexSubscriptionConfig struct {
+	// Catalog controls authenticated upstream model discovery.
+	// +optional
+	Catalog *CodexCatalogConfig `json:"catalog,omitempty"`
+
+	// Models restricts the usable upstream catalog. Deny entries take precedence.
+	// +optional
+	Models *CodexModelPolicy `json:"models,omitempty"`
+}
+
+type CodexCatalogConfig struct {
+	// RefreshInterval is the period a successful catalog remains fresh.
+	// +kubebuilder:default="5m"
+	// +optional
+	RefreshInterval *Duration `json:"refreshInterval,omitempty"`
+
+	// StaleWhileRevalidate is the maximum additional period a last-known-good
+	// catalog can be served while refresh is retried.
+	// +kubebuilder:default="1h"
+	// +optional
+	StaleWhileRevalidate *Duration `json:"staleWhileRevalidate,omitempty"`
+}
+
+// +kubebuilder:validation:XValidation:rule="self.allow.all(v, v == '*' || v.matches(\"^[^*]+[*]?$\") || v.matches(\"^[*][^*]+$\"))",message="allow entries must be exact, prefix*, *suffix, or *"
+// +kubebuilder:validation:XValidation:rule="self.deny.all(v, v == '*' || v.matches(\"^[^*]+[*]?$\") || v.matches(\"^[*][^*]+$\"))",message="deny entries must be exact, prefix*, *suffix, or *"
+type CodexModelPolicy struct {
+	// Allow is an optional local allowlist. When unset, all usable upstream models are allowed.
+	// +kubebuilder:validation:MaxItems=8
+	// +optional
+	Allow []TinyString `json:"allow,omitempty"`
+
+	// Deny blocks matching models even when allow permits them.
+	// +kubebuilder:validation:MaxItems=8
+	// +optional
+	Deny []TinyString `json:"deny,omitempty"`
 }
 
 // References a namespace-local backend resource.

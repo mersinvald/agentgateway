@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 
 	"google.golang.org/protobuf/proto"
 	"istio.io/istio/pkg/slices"
@@ -749,6 +750,81 @@ func TestBuildAIBackend(t *testing.T) {
 			testutils.CompareGolden(t, []byte(b), fmt.Sprintf("testdata/%v.yaml", tt.name))
 		})
 	}
+}
+
+func TestBuildCodexSubscriptionProvider(t *testing.T) {
+	tests := []struct {
+		name        string
+		config      *agentgateway.CodexSubscriptionConfig
+		wantRefresh time.Duration
+		wantStale   time.Duration
+		wantAllow   []string
+		wantDeny    []string
+	}{
+		{
+			name:        "uses defaults",
+			config:      &agentgateway.CodexSubscriptionConfig{},
+			wantRefresh: 5 * time.Minute,
+			wantStale:   time.Hour,
+			wantAllow:   []string{"*"},
+		},
+		{
+			name: "translates explicit catalog and model settings",
+			config: &agentgateway.CodexSubscriptionConfig{
+				Catalog: &agentgateway.CodexCatalogConfig{
+					RefreshInterval:      &agentgateway.Duration{Duration: 30 * time.Second},
+					StaleWhileRevalidate: &agentgateway.Duration{Duration: 10 * time.Minute},
+				},
+				Models: &agentgateway.CodexModelPolicy{
+					Allow: []agentgateway.TinyString{"gpt-5*", "o3"},
+					Deny:  []agentgateway.TinyString{"*mini"},
+				},
+			},
+			wantRefresh: 30 * time.Second,
+			wantStale:   10 * time.Minute,
+			wantAllow:   []string{"gpt-5*", "o3"},
+			wantDeny:    []string{"*mini"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			backend := &agentgateway.AgentgatewayBackend{
+				Name:      "codex-backend",
+				Namespace: "test-ns",
+				Spec: agentgateway.AgentgatewayBackendSpec{
+					AI: &agentgateway.AIBackend{LLM: &agentgateway.LLMProvider{
+						CodexSubscription: tt.config,
+					}},
+				},
+			}
+
+			result, err := agentgatewaybackend.BuildAgwBackend(testutils.BuildMockPolicyContext(t, nil), backend)
+			assert.NoError(t, err)
+			provider := result[0].GetAi().GetProviderGroups()[0].GetProviders()[0].GetCodexSubscription()
+			assert.Equal(t, provider.GetRefreshInterval().AsDuration(), tt.wantRefresh)
+			assert.Equal(t, provider.GetStaleWhileRevalidate().AsDuration(), tt.wantStale)
+			assert.Equal(t, provider.GetAllowModels(), tt.wantAllow)
+			assert.Equal(t, provider.GetDenyModels(), tt.wantDeny)
+		})
+	}
+}
+
+func TestTranslateCodexSubscriptionOAuthCredentialReference(t *testing.T) {
+	ctx := testutils.BuildMockPolicyContext(t, nil)
+	policies, err := agentgatewaybackend.TranslateBackendPolicies(ctx, "test-ns", &agentgateway.BackendFull{
+		CodexSubscriptionAuth: &agentgateway.CodexSubscriptionAuth{
+			CredentialRef: agentgateway.CodexOAuthCredentialRef{
+				ID:         "credential-record-7c0d",
+				Generation: "42",
+			},
+		},
+	})
+
+	assert.NoError(t, err)
+	auth := policies[0].GetCodexSubscriptionAuth()
+	assert.Equal(t, "credential-record-7c0d", auth.GetCredentialId())
+	assert.Equal(t, "42", auth.GetGeneration())
 }
 
 func TestBuildAgwBackendReferencesIncludesCustomProviderBackendRefs(t *testing.T) {

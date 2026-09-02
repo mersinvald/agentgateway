@@ -1713,6 +1713,22 @@ message BackendPolicySpec {
     reserved "remote", "methods";
   }
 
+  // Opaque reference to the refresh-capable OAuth credential record used for
+  // Codex inference and its account-scoped model catalog. The runtime
+  // credential manager resolves token material locally; xDS never carries
+  // access tokens, refresh tokens, account IDs, or residency values.
+  message CodexSubscriptionAuth {
+    reserved 1 to 4;
+    reserved "authorization", "chatgpt_account_id", "x_openai_residency", "x_openai_fedramp";
+
+    // Opaque ID understood only by the credential manager.
+    string credential_id = 6;
+
+    // Credential-record generation. Changes invalidate any runtime state
+    // associated with a prior record generation.
+    string generation = 5;
+  }
+
   oneof kind {
     A2a a2a = 1;
     InferenceRouting inference_routing = 2;
@@ -1736,6 +1752,7 @@ message BackendPolicySpec {
     // AI failover providers use this to preserve the authorization policy of
     // the concrete model from which the provider was lowered.
     TrafficPolicySpec.RBAC authorization = 19;
+    CodexSubscriptionAuth codex_subscription_auth = 20;
   }
 }
 
@@ -1845,6 +1862,15 @@ message AIBackend {
     optional string model = 2;
     optional string provider_override = 3;
   }
+  // ChatGPT subscription-backed Codex provider. Model availability is supplied
+  // dynamically by the authenticated Codex catalog, so this intentionally has
+  // no model override field.
+  message CodexSubscription {
+    google.protobuf.Duration refresh_interval = 1;
+    google.protobuf.Duration stale_while_revalidate = 2;
+    repeated string allow_models = 3;
+    repeated string deny_models = 4;
+  }
   // A named provider configuration implemented by the data plane. Its API
   // formats and default endpoint stay aligned between standalone and xDS
   // configuration. Use Custom when those settings must be configured
@@ -1893,6 +1919,7 @@ message AIBackend {
       Azure azure = 13;
       Custom custom = 15;
       ProviderPreset provider_preset = 16;
+      CodexSubscription codex_subscription = 19;
     }
     repeated BackendPolicySpec inline_policies = 10;
   }

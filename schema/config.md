@@ -5941,7 +5941,7 @@
 |`binds[].listeners[].routes[].backends[].mcp.dnsRebindingProtection`|boolean|Opt-in MCP DNS rebinding protection (Host/Origin must be localhost).<br>Off by default; see https://github.com/agentgateway/agentgateway/issues/1855.|
 |`binds[].listeners[].routes[].backends[].ai`|object||
 |`binds[].listeners[].routes[].backends[].ai.name`|string|Name identifying this provider, referenced by `llm.models[].provider`.|
-|`binds[].listeners[].routes[].backends[].ai.provider`|object|The upstream LLM provider type and its configuration.<br>Exactly one of openAI, gemini, vertex, anthropic, bedrock, azure, copilot, or custom may be set.|
+|`binds[].listeners[].routes[].backends[].ai.provider`|object|The upstream LLM provider type and its configuration.<br>Exactly one of openAI, gemini, vertex, anthropic, bedrock, azure, copilot, codexSubscription, or custom may be set.|
 |`binds[].listeners[].routes[].backends[].ai.provider.openAI`|object||
 |`binds[].listeners[].routes[].backends[].ai.provider.openAI.model`|string|Model ID to send to OpenAI, overriding the model in the client request.|
 |`binds[].listeners[].routes[].backends[].ai.provider.openAI.moderation`|object|Configuration for running OpenAI inline moderation on request input and generated output.|
@@ -5972,6 +5972,15 @@
 |`binds[].listeners[].routes[].backends[].ai.provider.azure.projectName`|string|The Foundry project name, required when `resourceType` is `foundry`.<br>Used to construct paths: `/api/projects/{projectName}/openai/v1/...`.<br>This is distinct from `resourceName` which is used for the host.|
 |`binds[].listeners[].routes[].backends[].ai.provider.copilot`|object||
 |`binds[].listeners[].routes[].backends[].ai.provider.copilot.model`|string|Model ID to send to GitHub Copilot, overriding the model in the client request.|
+|`binds[].listeners[].routes[].backends[].ai.provider.codexSubscription`|object||
+|`binds[].listeners[].routes[].backends[].ai.provider.codexSubscription.refreshInterval`|object||
+|`binds[].listeners[].routes[].backends[].ai.provider.codexSubscription.refreshInterval.secs`|integer||
+|`binds[].listeners[].routes[].backends[].ai.provider.codexSubscription.refreshInterval.nanos`|integer||
+|`binds[].listeners[].routes[].backends[].ai.provider.codexSubscription.staleWhileRevalidate`|object||
+|`binds[].listeners[].routes[].backends[].ai.provider.codexSubscription.staleWhileRevalidate.secs`|integer||
+|`binds[].listeners[].routes[].backends[].ai.provider.codexSubscription.staleWhileRevalidate.nanos`|integer||
+|`binds[].listeners[].routes[].backends[].ai.provider.codexSubscription.allowModels`|[]string||
+|`binds[].listeners[].routes[].backends[].ai.provider.codexSubscription.denyModels`|[]string||
 |`binds[].listeners[].routes[].backends[].ai.provider.custom`|object||
 |`binds[].listeners[].routes[].backends[].ai.provider.custom.model`|string|Model ID to send to the provider, overriding the model in the client request.|
 |`binds[].listeners[].routes[].backends[].ai.provider.custom.providerOverride`|string|Provider identity for cost-catalog lookup and telemetry. Built-in named providers<br>(cohere, mistral, ...) set this so their cost resolves under the right catalog key;<br>a bare custom provider may set it to match a catalog entry. Falls back to "custom".|
@@ -9293,7 +9302,7 @@
 |`binds[].listeners[].routes[].backends[].ai.groups`|[]object||
 |`binds[].listeners[].routes[].backends[].ai.groups[].providers`|[]object|LLM providers in this group, load balanced together.|
 |`binds[].listeners[].routes[].backends[].ai.groups[].providers[].name`|string|Name identifying this provider, referenced by `llm.models[].provider`.|
-|`binds[].listeners[].routes[].backends[].ai.groups[].providers[].provider`|object|The upstream LLM provider type and its configuration.<br>Exactly one of openAI, gemini, vertex, anthropic, bedrock, azure, copilot, or custom may be set.|
+|`binds[].listeners[].routes[].backends[].ai.groups[].providers[].provider`|object|The upstream LLM provider type and its configuration.<br>Exactly one of openAI, gemini, vertex, anthropic, bedrock, azure, copilot, codexSubscription, or custom may be set.|
 |`binds[].listeners[].routes[].backends[].ai.groups[].providers[].provider.openAI`|object||
 |`binds[].listeners[].routes[].backends[].ai.groups[].providers[].provider.openAI.model`|string|Model ID to send to OpenAI, overriding the model in the client request.|
 |`binds[].listeners[].routes[].backends[].ai.groups[].providers[].provider.openAI.moderation`|object|Configuration for running OpenAI inline moderation on request input and generated output.|
@@ -9324,6 +9333,15 @@
 |`binds[].listeners[].routes[].backends[].ai.groups[].providers[].provider.azure.projectName`|string|The Foundry project name, required when `resourceType` is `foundry`.<br>Used to construct paths: `/api/projects/{projectName}/openai/v1/...`.<br>This is distinct from `resourceName` which is used for the host.|
 |`binds[].listeners[].routes[].backends[].ai.groups[].providers[].provider.copilot`|object||
 |`binds[].listeners[].routes[].backends[].ai.groups[].providers[].provider.copilot.model`|string|Model ID to send to GitHub Copilot, overriding the model in the client request.|
+|`binds[].listeners[].routes[].backends[].ai.groups[].providers[].provider.codexSubscription`|object||
+|`binds[].listeners[].routes[].backends[].ai.groups[].providers[].provider.codexSubscription.refreshInterval`|object||
+|`binds[].listeners[].routes[].backends[].ai.groups[].providers[].provider.codexSubscription.refreshInterval.secs`|integer||
+|`binds[].listeners[].routes[].backends[].ai.groups[].providers[].provider.codexSubscription.refreshInterval.nanos`|integer||
+|`binds[].listeners[].routes[].backends[].ai.groups[].providers[].provider.codexSubscription.staleWhileRevalidate`|object||
+|`binds[].listeners[].routes[].backends[].ai.groups[].providers[].provider.codexSubscription.staleWhileRevalidate.secs`|integer||
+|`binds[].listeners[].routes[].backends[].ai.groups[].providers[].provider.codexSubscription.staleWhileRevalidate.nanos`|integer||
+|`binds[].listeners[].routes[].backends[].ai.groups[].providers[].provider.codexSubscription.allowModels`|[]string||
+|`binds[].listeners[].routes[].backends[].ai.groups[].providers[].provider.codexSubscription.denyModels`|[]string||
 |`binds[].listeners[].routes[].backends[].ai.groups[].providers[].provider.custom`|object||
 |`binds[].listeners[].routes[].backends[].ai.groups[].providers[].provider.custom.model`|string|Model ID to send to the provider, overriding the model in the client request.|
 |`binds[].listeners[].routes[].backends[].ai.groups[].providers[].provider.custom.providerOverride`|string|Provider identity for cost-catalog lookup and telemetry. Built-in named providers<br>(cohere, mistral, ...) set this so their cost resolves under the right catalog key;<br>a bare custom provider may set it to match a catalog entry. Falls back to "custom".|
@@ -24585,7 +24603,7 @@
 |`backends[].mcp.dnsRebindingProtection`|boolean|Opt-in MCP DNS rebinding protection (Host/Origin must be localhost).<br>Off by default; see https://github.com/agentgateway/agentgateway/issues/1855.|
 |`backends[].ai`|object||
 |`backends[].ai.name`|string|Name identifying this provider, referenced by `llm.models[].provider`.|
-|`backends[].ai.provider`|object|The upstream LLM provider type and its configuration.<br>Exactly one of openAI, gemini, vertex, anthropic, bedrock, azure, copilot, or custom may be set.|
+|`backends[].ai.provider`|object|The upstream LLM provider type and its configuration.<br>Exactly one of openAI, gemini, vertex, anthropic, bedrock, azure, copilot, codexSubscription, or custom may be set.|
 |`backends[].ai.provider.openAI`|object||
 |`backends[].ai.provider.openAI.model`|string|Model ID to send to OpenAI, overriding the model in the client request.|
 |`backends[].ai.provider.openAI.moderation`|object|Configuration for running OpenAI inline moderation on request input and generated output.|
@@ -24616,6 +24634,15 @@
 |`backends[].ai.provider.azure.projectName`|string|The Foundry project name, required when `resourceType` is `foundry`.<br>Used to construct paths: `/api/projects/{projectName}/openai/v1/...`.<br>This is distinct from `resourceName` which is used for the host.|
 |`backends[].ai.provider.copilot`|object||
 |`backends[].ai.provider.copilot.model`|string|Model ID to send to GitHub Copilot, overriding the model in the client request.|
+|`backends[].ai.provider.codexSubscription`|object||
+|`backends[].ai.provider.codexSubscription.refreshInterval`|object||
+|`backends[].ai.provider.codexSubscription.refreshInterval.secs`|integer||
+|`backends[].ai.provider.codexSubscription.refreshInterval.nanos`|integer||
+|`backends[].ai.provider.codexSubscription.staleWhileRevalidate`|object||
+|`backends[].ai.provider.codexSubscription.staleWhileRevalidate.secs`|integer||
+|`backends[].ai.provider.codexSubscription.staleWhileRevalidate.nanos`|integer||
+|`backends[].ai.provider.codexSubscription.allowModels`|[]string||
+|`backends[].ai.provider.codexSubscription.denyModels`|[]string||
 |`backends[].ai.provider.custom`|object||
 |`backends[].ai.provider.custom.model`|string|Model ID to send to the provider, overriding the model in the client request.|
 |`backends[].ai.provider.custom.providerOverride`|string|Provider identity for cost-catalog lookup and telemetry. Built-in named providers<br>(cohere, mistral, ...) set this so their cost resolves under the right catalog key;<br>a bare custom provider may set it to match a catalog entry. Falls back to "custom".|
@@ -27937,7 +27964,7 @@
 |`backends[].ai.groups`|[]object||
 |`backends[].ai.groups[].providers`|[]object|LLM providers in this group, load balanced together.|
 |`backends[].ai.groups[].providers[].name`|string|Name identifying this provider, referenced by `llm.models[].provider`.|
-|`backends[].ai.groups[].providers[].provider`|object|The upstream LLM provider type and its configuration.<br>Exactly one of openAI, gemini, vertex, anthropic, bedrock, azure, copilot, or custom may be set.|
+|`backends[].ai.groups[].providers[].provider`|object|The upstream LLM provider type and its configuration.<br>Exactly one of openAI, gemini, vertex, anthropic, bedrock, azure, copilot, codexSubscription, or custom may be set.|
 |`backends[].ai.groups[].providers[].provider.openAI`|object||
 |`backends[].ai.groups[].providers[].provider.openAI.model`|string|Model ID to send to OpenAI, overriding the model in the client request.|
 |`backends[].ai.groups[].providers[].provider.openAI.moderation`|object|Configuration for running OpenAI inline moderation on request input and generated output.|
@@ -27968,6 +27995,15 @@
 |`backends[].ai.groups[].providers[].provider.azure.projectName`|string|The Foundry project name, required when `resourceType` is `foundry`.<br>Used to construct paths: `/api/projects/{projectName}/openai/v1/...`.<br>This is distinct from `resourceName` which is used for the host.|
 |`backends[].ai.groups[].providers[].provider.copilot`|object||
 |`backends[].ai.groups[].providers[].provider.copilot.model`|string|Model ID to send to GitHub Copilot, overriding the model in the client request.|
+|`backends[].ai.groups[].providers[].provider.codexSubscription`|object||
+|`backends[].ai.groups[].providers[].provider.codexSubscription.refreshInterval`|object||
+|`backends[].ai.groups[].providers[].provider.codexSubscription.refreshInterval.secs`|integer||
+|`backends[].ai.groups[].providers[].provider.codexSubscription.refreshInterval.nanos`|integer||
+|`backends[].ai.groups[].providers[].provider.codexSubscription.staleWhileRevalidate`|object||
+|`backends[].ai.groups[].providers[].provider.codexSubscription.staleWhileRevalidate.secs`|integer||
+|`backends[].ai.groups[].providers[].provider.codexSubscription.staleWhileRevalidate.nanos`|integer||
+|`backends[].ai.groups[].providers[].provider.codexSubscription.allowModels`|[]string||
+|`backends[].ai.groups[].providers[].provider.codexSubscription.denyModels`|[]string||
 |`backends[].ai.groups[].providers[].provider.custom`|object||
 |`backends[].ai.groups[].providers[].provider.custom.model`|string|Model ID to send to the provider, overriding the model in the client request.|
 |`backends[].ai.groups[].providers[].provider.custom.providerOverride`|string|Provider identity for cost-catalog lookup and telemetry. Built-in named providers<br>(cohere, mistral, ...) set this so their cost resolves under the right catalog key;<br>a bare custom provider may set it to match a catalog entry. Falls back to "custom".|
@@ -40416,7 +40452,7 @@
 |`routeGroups[].routes[].backends[].mcp.dnsRebindingProtection`|boolean|Opt-in MCP DNS rebinding protection (Host/Origin must be localhost).<br>Off by default; see https://github.com/agentgateway/agentgateway/issues/1855.|
 |`routeGroups[].routes[].backends[].ai`|object||
 |`routeGroups[].routes[].backends[].ai.name`|string|Name identifying this provider, referenced by `llm.models[].provider`.|
-|`routeGroups[].routes[].backends[].ai.provider`|object|The upstream LLM provider type and its configuration.<br>Exactly one of openAI, gemini, vertex, anthropic, bedrock, azure, copilot, or custom may be set.|
+|`routeGroups[].routes[].backends[].ai.provider`|object|The upstream LLM provider type and its configuration.<br>Exactly one of openAI, gemini, vertex, anthropic, bedrock, azure, copilot, codexSubscription, or custom may be set.|
 |`routeGroups[].routes[].backends[].ai.provider.openAI`|object||
 |`routeGroups[].routes[].backends[].ai.provider.openAI.model`|string|Model ID to send to OpenAI, overriding the model in the client request.|
 |`routeGroups[].routes[].backends[].ai.provider.openAI.moderation`|object|Configuration for running OpenAI inline moderation on request input and generated output.|
@@ -40447,6 +40483,15 @@
 |`routeGroups[].routes[].backends[].ai.provider.azure.projectName`|string|The Foundry project name, required when `resourceType` is `foundry`.<br>Used to construct paths: `/api/projects/{projectName}/openai/v1/...`.<br>This is distinct from `resourceName` which is used for the host.|
 |`routeGroups[].routes[].backends[].ai.provider.copilot`|object||
 |`routeGroups[].routes[].backends[].ai.provider.copilot.model`|string|Model ID to send to GitHub Copilot, overriding the model in the client request.|
+|`routeGroups[].routes[].backends[].ai.provider.codexSubscription`|object||
+|`routeGroups[].routes[].backends[].ai.provider.codexSubscription.refreshInterval`|object||
+|`routeGroups[].routes[].backends[].ai.provider.codexSubscription.refreshInterval.secs`|integer||
+|`routeGroups[].routes[].backends[].ai.provider.codexSubscription.refreshInterval.nanos`|integer||
+|`routeGroups[].routes[].backends[].ai.provider.codexSubscription.staleWhileRevalidate`|object||
+|`routeGroups[].routes[].backends[].ai.provider.codexSubscription.staleWhileRevalidate.secs`|integer||
+|`routeGroups[].routes[].backends[].ai.provider.codexSubscription.staleWhileRevalidate.nanos`|integer||
+|`routeGroups[].routes[].backends[].ai.provider.codexSubscription.allowModels`|[]string||
+|`routeGroups[].routes[].backends[].ai.provider.codexSubscription.denyModels`|[]string||
 |`routeGroups[].routes[].backends[].ai.provider.custom`|object||
 |`routeGroups[].routes[].backends[].ai.provider.custom.model`|string|Model ID to send to the provider, overriding the model in the client request.|
 |`routeGroups[].routes[].backends[].ai.provider.custom.providerOverride`|string|Provider identity for cost-catalog lookup and telemetry. Built-in named providers<br>(cohere, mistral, ...) set this so their cost resolves under the right catalog key;<br>a bare custom provider may set it to match a catalog entry. Falls back to "custom".|
@@ -43768,7 +43813,7 @@
 |`routeGroups[].routes[].backends[].ai.groups`|[]object||
 |`routeGroups[].routes[].backends[].ai.groups[].providers`|[]object|LLM providers in this group, load balanced together.|
 |`routeGroups[].routes[].backends[].ai.groups[].providers[].name`|string|Name identifying this provider, referenced by `llm.models[].provider`.|
-|`routeGroups[].routes[].backends[].ai.groups[].providers[].provider`|object|The upstream LLM provider type and its configuration.<br>Exactly one of openAI, gemini, vertex, anthropic, bedrock, azure, copilot, or custom may be set.|
+|`routeGroups[].routes[].backends[].ai.groups[].providers[].provider`|object|The upstream LLM provider type and its configuration.<br>Exactly one of openAI, gemini, vertex, anthropic, bedrock, azure, copilot, codexSubscription, or custom may be set.|
 |`routeGroups[].routes[].backends[].ai.groups[].providers[].provider.openAI`|object||
 |`routeGroups[].routes[].backends[].ai.groups[].providers[].provider.openAI.model`|string|Model ID to send to OpenAI, overriding the model in the client request.|
 |`routeGroups[].routes[].backends[].ai.groups[].providers[].provider.openAI.moderation`|object|Configuration for running OpenAI inline moderation on request input and generated output.|
@@ -43799,6 +43844,15 @@
 |`routeGroups[].routes[].backends[].ai.groups[].providers[].provider.azure.projectName`|string|The Foundry project name, required when `resourceType` is `foundry`.<br>Used to construct paths: `/api/projects/{projectName}/openai/v1/...`.<br>This is distinct from `resourceName` which is used for the host.|
 |`routeGroups[].routes[].backends[].ai.groups[].providers[].provider.copilot`|object||
 |`routeGroups[].routes[].backends[].ai.groups[].providers[].provider.copilot.model`|string|Model ID to send to GitHub Copilot, overriding the model in the client request.|
+|`routeGroups[].routes[].backends[].ai.groups[].providers[].provider.codexSubscription`|object||
+|`routeGroups[].routes[].backends[].ai.groups[].providers[].provider.codexSubscription.refreshInterval`|object||
+|`routeGroups[].routes[].backends[].ai.groups[].providers[].provider.codexSubscription.refreshInterval.secs`|integer||
+|`routeGroups[].routes[].backends[].ai.groups[].providers[].provider.codexSubscription.refreshInterval.nanos`|integer||
+|`routeGroups[].routes[].backends[].ai.groups[].providers[].provider.codexSubscription.staleWhileRevalidate`|object||
+|`routeGroups[].routes[].backends[].ai.groups[].providers[].provider.codexSubscription.staleWhileRevalidate.secs`|integer||
+|`routeGroups[].routes[].backends[].ai.groups[].providers[].provider.codexSubscription.staleWhileRevalidate.nanos`|integer||
+|`routeGroups[].routes[].backends[].ai.groups[].providers[].provider.codexSubscription.allowModels`|[]string||
+|`routeGroups[].routes[].backends[].ai.groups[].providers[].provider.codexSubscription.denyModels`|[]string||
 |`routeGroups[].routes[].backends[].ai.groups[].providers[].provider.custom`|object||
 |`routeGroups[].routes[].backends[].ai.groups[].providers[].provider.custom.model`|string|Model ID to send to the provider, overriding the model in the client request.|
 |`routeGroups[].routes[].backends[].ai.groups[].providers[].provider.custom.providerOverride`|string|Provider identity for cost-catalog lookup and telemetry. Built-in named providers<br>(cohere, mistral, ...) set this so their cost resolves under the right catalog key;<br>a bare custom provider may set it to match a catalog entry. Falls back to "custom".|
@@ -58873,7 +58927,7 @@
 |`routes[].backends[].mcp.dnsRebindingProtection`|boolean|Opt-in MCP DNS rebinding protection (Host/Origin must be localhost).<br>Off by default; see https://github.com/agentgateway/agentgateway/issues/1855.|
 |`routes[].backends[].ai`|object||
 |`routes[].backends[].ai.name`|string|Name identifying this provider, referenced by `llm.models[].provider`.|
-|`routes[].backends[].ai.provider`|object|The upstream LLM provider type and its configuration.<br>Exactly one of openAI, gemini, vertex, anthropic, bedrock, azure, copilot, or custom may be set.|
+|`routes[].backends[].ai.provider`|object|The upstream LLM provider type and its configuration.<br>Exactly one of openAI, gemini, vertex, anthropic, bedrock, azure, copilot, codexSubscription, or custom may be set.|
 |`routes[].backends[].ai.provider.openAI`|object||
 |`routes[].backends[].ai.provider.openAI.model`|string|Model ID to send to OpenAI, overriding the model in the client request.|
 |`routes[].backends[].ai.provider.openAI.moderation`|object|Configuration for running OpenAI inline moderation on request input and generated output.|
@@ -58904,6 +58958,15 @@
 |`routes[].backends[].ai.provider.azure.projectName`|string|The Foundry project name, required when `resourceType` is `foundry`.<br>Used to construct paths: `/api/projects/{projectName}/openai/v1/...`.<br>This is distinct from `resourceName` which is used for the host.|
 |`routes[].backends[].ai.provider.copilot`|object||
 |`routes[].backends[].ai.provider.copilot.model`|string|Model ID to send to GitHub Copilot, overriding the model in the client request.|
+|`routes[].backends[].ai.provider.codexSubscription`|object||
+|`routes[].backends[].ai.provider.codexSubscription.refreshInterval`|object||
+|`routes[].backends[].ai.provider.codexSubscription.refreshInterval.secs`|integer||
+|`routes[].backends[].ai.provider.codexSubscription.refreshInterval.nanos`|integer||
+|`routes[].backends[].ai.provider.codexSubscription.staleWhileRevalidate`|object||
+|`routes[].backends[].ai.provider.codexSubscription.staleWhileRevalidate.secs`|integer||
+|`routes[].backends[].ai.provider.codexSubscription.staleWhileRevalidate.nanos`|integer||
+|`routes[].backends[].ai.provider.codexSubscription.allowModels`|[]string||
+|`routes[].backends[].ai.provider.codexSubscription.denyModels`|[]string||
 |`routes[].backends[].ai.provider.custom`|object||
 |`routes[].backends[].ai.provider.custom.model`|string|Model ID to send to the provider, overriding the model in the client request.|
 |`routes[].backends[].ai.provider.custom.providerOverride`|string|Provider identity for cost-catalog lookup and telemetry. Built-in named providers<br>(cohere, mistral, ...) set this so their cost resolves under the right catalog key;<br>a bare custom provider may set it to match a catalog entry. Falls back to "custom".|
@@ -62225,7 +62288,7 @@
 |`routes[].backends[].ai.groups`|[]object||
 |`routes[].backends[].ai.groups[].providers`|[]object|LLM providers in this group, load balanced together.|
 |`routes[].backends[].ai.groups[].providers[].name`|string|Name identifying this provider, referenced by `llm.models[].provider`.|
-|`routes[].backends[].ai.groups[].providers[].provider`|object|The upstream LLM provider type and its configuration.<br>Exactly one of openAI, gemini, vertex, anthropic, bedrock, azure, copilot, or custom may be set.|
+|`routes[].backends[].ai.groups[].providers[].provider`|object|The upstream LLM provider type and its configuration.<br>Exactly one of openAI, gemini, vertex, anthropic, bedrock, azure, copilot, codexSubscription, or custom may be set.|
 |`routes[].backends[].ai.groups[].providers[].provider.openAI`|object||
 |`routes[].backends[].ai.groups[].providers[].provider.openAI.model`|string|Model ID to send to OpenAI, overriding the model in the client request.|
 |`routes[].backends[].ai.groups[].providers[].provider.openAI.moderation`|object|Configuration for running OpenAI inline moderation on request input and generated output.|
@@ -62256,6 +62319,15 @@
 |`routes[].backends[].ai.groups[].providers[].provider.azure.projectName`|string|The Foundry project name, required when `resourceType` is `foundry`.<br>Used to construct paths: `/api/projects/{projectName}/openai/v1/...`.<br>This is distinct from `resourceName` which is used for the host.|
 |`routes[].backends[].ai.groups[].providers[].provider.copilot`|object||
 |`routes[].backends[].ai.groups[].providers[].provider.copilot.model`|string|Model ID to send to GitHub Copilot, overriding the model in the client request.|
+|`routes[].backends[].ai.groups[].providers[].provider.codexSubscription`|object||
+|`routes[].backends[].ai.groups[].providers[].provider.codexSubscription.refreshInterval`|object||
+|`routes[].backends[].ai.groups[].providers[].provider.codexSubscription.refreshInterval.secs`|integer||
+|`routes[].backends[].ai.groups[].providers[].provider.codexSubscription.refreshInterval.nanos`|integer||
+|`routes[].backends[].ai.groups[].providers[].provider.codexSubscription.staleWhileRevalidate`|object||
+|`routes[].backends[].ai.groups[].providers[].provider.codexSubscription.staleWhileRevalidate.secs`|integer||
+|`routes[].backends[].ai.groups[].providers[].provider.codexSubscription.staleWhileRevalidate.nanos`|integer||
+|`routes[].backends[].ai.groups[].providers[].provider.codexSubscription.allowModels`|[]string||
+|`routes[].backends[].ai.groups[].providers[].provider.codexSubscription.denyModels`|[]string||
 |`routes[].backends[].ai.groups[].providers[].provider.custom`|object||
 |`routes[].backends[].ai.groups[].providers[].provider.custom.model`|string|Model ID to send to the provider, overriding the model in the client request.|
 |`routes[].backends[].ai.groups[].providers[].provider.custom.providerOverride`|string|Provider identity for cost-catalog lookup and telemetry. Built-in named providers<br>(cohere, mistral, ...) set this so their cost resolves under the right catalog key;<br>a bare custom provider may set it to match a catalog entry. Falls back to "custom".|

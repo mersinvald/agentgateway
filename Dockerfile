@@ -58,6 +58,11 @@ ARG VERSION
 ARG GIT_REVISION
 ARG CARGO_FEATURES=agentgateway/ui
 ARG CARGO_NO_DEFAULT_FEATURES=false
+# Optional low-memory controls for constrained builders. Empty values preserve
+# Cargo's configured defaults.
+ARG CARGO_BUILD_JOBS
+ARG CARGO_PROFILE_RELEASE_LTO
+ARG CARGO_PROFILE_RELEASE_CODEGEN_UNITS
 
 WORKDIR /app
 
@@ -77,6 +82,15 @@ RUN --mount=type=cache,target=/app/target \
     <<EOF
 export VERSION="${VERSION}"
 export GIT_REVISION="${GIT_REVISION}"
+if [ -n "${CARGO_BUILD_JOBS}" ]; then
+  export CARGO_BUILD_JOBS
+fi
+if [ -n "${CARGO_PROFILE_RELEASE_LTO}" ]; then
+  export CARGO_PROFILE_RELEASE_LTO
+fi
+if [ -n "${CARGO_PROFILE_RELEASE_CODEGEN_UNITS}" ]; then
+  export CARGO_PROFILE_RELEASE_CODEGEN_UNITS
+fi
 # Build jemalloc for 64KB pages on arm64 so the image runs on hosts with any page
 # size <= 64KB (4KB/16KB/64KB).
 if [ "${TARGETARCH}" = "arm64" ]; then

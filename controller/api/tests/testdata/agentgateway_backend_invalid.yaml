@@ -10,6 +10,20 @@ spec:
         apiVersion: 2024-01-01
         endpoint: test
 ---
+_err: generation
+apiVersion: agentgateway.dev/v1alpha1
+kind: AgentgatewayBackend
+metadata:
+  name: codex-oauth-credential-reference-missing-generation
+spec:
+  policies:
+    codexSubscriptionAuth:
+      credentialRef:
+        id: codex-oauth-record-primary
+  ai:
+    provider:
+      codexSubscription: {}
+---
 _err: unknown fields
 apiVersion: agentgateway.dev/v1alpha1
 kind: AgentgatewayBackend

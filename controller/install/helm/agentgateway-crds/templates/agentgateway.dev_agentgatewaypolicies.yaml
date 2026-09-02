@@ -5170,6 +5170,35 @@ spec:
                         be set
                       rule: '[has(self.key),has(self.secretRef),has(self.passthrough),has(self.aws),has(self.azure),has(self.gcp),has(self.oauthTokenExchange),has(self.crossAppAccess),has(self.jwtSign)].filter(x,x==true).size()
                         <= 1'
+                  codexSubscriptionAuth:
+                    description: |-
+                      Credentials for a codexSubscription provider. This policy is only valid
+                      when the selected AI provider is codexSubscription.
+                    properties:
+                      credentialRef:
+                        description: |-
+                          CredentialRef identifies the OAuth credential record managed by the
+                          runtime credential store.
+                        properties:
+                          generation:
+                            description: Generation is the credential-store record
+                              generation.
+                            maxLength: 256
+                            minLength: 1
+                            type: string
+                          id:
+                            description: ID is the opaque credential-store record
+                              identifier.
+                            maxLength: 256
+                            minLength: 1
+                            type: string
+                        required:
+                        - generation
+                        - id
+                        type: object
+                    required:
+                    - credentialRef
+                    type: object
                   extAuth:
                     description: |-
                       External authentication configuration for requests
@@ -6488,9 +6517,10 @@ spec:
                       rule: '!has(self.url) || self.url.matches(''^https?://[^/?#]+$'')'
                 type: object
                 x-kubernetes-validations:
-                - message: at least one of the fields in [ai auth extAuth health http
-                    mcp tcp tls transformation tunnel] must be set
-                  rule: '[has(self.ai),has(self.auth),has(self.extAuth),has(self.health),has(self.http),has(self.mcp),has(self.tcp),has(self.tls),has(self.transformation),has(self.tunnel)].filter(x,x==true).size()
+                - message: at least one of the fields in [ai auth codexSubscriptionAuth
+                    extAuth health http mcp tcp tls transformation tunnel] must be
+                    set
+                  rule: '[has(self.ai),has(self.auth),has(self.codexSubscriptionAuth),has(self.extAuth),has(self.health),has(self.http),has(self.mcp),has(self.tcp),has(self.tls),has(self.transformation),has(self.tunnel)].filter(x,x==true).size()
                     >= 1'
               frontend:
                 description: |-

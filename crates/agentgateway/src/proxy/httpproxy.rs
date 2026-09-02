@@ -22,6 +22,7 @@ use types::discovery::*;
 
 use crate::cel::{BackendContext, RequestTime};
 use crate::client::{ApplicationTransport, HboneHeaders, HboneSourceRole, Transport};
+use crate::crypto::digest::Sha256;
 use crate::http::backendtls::{
 	BackendTLS, BackendTLSSource, SpiffeBackendTLS, VersionedBackendTLS,
 };
@@ -35,7 +36,7 @@ use crate::http::{
 	merge_in_headers, retry,
 };
 use crate::llm::{
-	InputFormat, LLMInfo, LLMRequest, LLMResponse, RequestResult, RouteType, model_router,
+	AIProvider, InputFormat, LLMInfo, LLMRequest, LLMResponse, RequestResult, RouteType, model_router,
 };
 use crate::proxy::tcpproxy::TCPProxy;
 use crate::proxy::{
@@ -575,6 +576,11 @@ pub struct HTTPProxy {
 #[derive(Debug)]
 pub struct SnapshottedProxyResponse(ProxyResponse);
 
+/// Marks a response whose Codex model admission was refreshed successfully.
+/// The retry loop consumes this marker exactly once.
+#[derive(Debug, Clone)]
+struct CodexModelRefresh;
+
 trait ResultWithSnapshot<T, E>
 where
 	E: Into<ProxyResponse>,
@@ -1025,11 +1031,21 @@ impl HTTPProxy {
 		let llm_request_policies = Arc::new(llm_request_policies);
 
 		// attempts is the total number of attempts, not the retries
-		let attempts = if substrate_default_retry {
+		let generic_attempts = if substrate_default_retry {
 			3
 		} else {
 			retries.as_ref().map(|r| r.attempts.get() + 1).unwrap_or(1)
 		};
+		let codex_model_refresh = backend_policies
+			.llm_provider
+			.as_ref()
+			.is_some_and(|llm| matches!(llm.provider, AIProvider::CodexSubscription(_)))
+			|| matches!(
+				&selected_backend.backend.backend,
+				Backend::AI(_, _) | Backend::LLMRouter(_, _)
+			);
+		// Reserve one replay slot for catalog refresh without increasing generic retries.
+		let attempts = generic_attempts + u8::from(codex_model_refresh);
 		let retry_backoff = retries.as_ref().and_then(|r| r.backoff);
 		let request_timeout = response_policies
 			.timeout
@@ -1065,6 +1081,7 @@ impl HTTPProxy {
 						Some(route_path.clone()),
 						response_policies,
 						req,
+						false,
 					)
 					.await;
 				// The body cannot be retried, but future requests must not reuse this assignment.
@@ -1080,6 +1097,7 @@ impl HTTPProxy {
 			},
 		};
 		let mut last_res: Option<Result<Response, SnapshottedProxyResponse>> = None;
+		let mut model_refresh_attempted = false;
 		for n in 0..attempts {
 			let last = n == attempts - 1;
 			let this = next.take().expect("next should be set");
@@ -1112,6 +1130,7 @@ impl HTTPProxy {
 					Some(route_path.clone()),
 					response_policies,
 					req,
+					codex_model_refresh && !model_refresh_attempted && !last,
 				)
 				.await;
 			let stale_assignment = is_stale_assignment(&res);
@@ -1119,7 +1138,14 @@ impl HTTPProxy {
 				// Clear the request-local assignment and evict the same generation from the shared cache.
 				substrate_state.as_ref().inspect(|state| state.evict());
 			}
-			let retryable = !last
+			let model_refresh_retry = res
+				.as_ref()
+				.ok()
+				.is_some_and(|response| response.extensions().get::<CodexModelRefresh>().is_some());
+			if model_refresh_retry {
+				model_refresh_attempted = true;
+			}
+			let generic_retryable = n < generic_attempts - 1
 				&& if substrate_default_retry {
 					stale_assignment
 				} else {
@@ -1129,6 +1155,7 @@ impl HTTPProxy {
 						log.request_snapshot.as_deref(),
 					)
 				};
+			let retryable = model_refresh_retry || generic_retryable;
 			if !retryable {
 				if !last {
 					debug!("response not retry-able");
@@ -1147,7 +1174,7 @@ impl HTTPProxy {
 			);
 			finalize_attempt_for_retry(log, &mut res);
 			last_res = Some(res);
-			if let Some(bo) = retry_backoff {
+			if !model_refresh_retry && let Some(bo) = retry_backoff {
 				let fut = if let Some(request_timeout) = request_timeout {
 					let deadline = tokio::time::Instant::from_std(log.start.as_instant() + request_timeout);
 					tokio::time::timeout_at(deadline, tokio::time::sleep(bo)).await
@@ -1441,6 +1468,7 @@ impl HTTPProxy {
 		route_path: Option<RoutePath<'_>>,
 		response_policies: &mut ResponsePolicies,
 		mut req: Request,
+		allow_codex_model_refresh: bool,
 	) -> Result<Response, SnapshottedProxyResponse> {
 		if let Some(backend_timeout) = response_policies
 			.timeout
@@ -1467,6 +1495,7 @@ impl HTTPProxy {
 			MustSnapshot::new(&mut req_opt),
 			Some(log),
 			response_policies,
+			allow_codex_model_refresh,
 		)
 		.assert_size::<{ 7 * 1024 }>();
 
@@ -2217,9 +2246,18 @@ async fn make_backend_call(
 	mut req: MustSnapshot<'_>,
 	mut log: Option<&mut RequestLog>,
 	response_policies: &mut ResponsePolicies,
+	allow_codex_model_refresh: bool,
 ) -> Result<Response, ProxyResponse> {
 	if let Backend::LLMRouter(_, router) = backend {
-		let resolved = match router.resolve(&mut req).await {
+		// Routers are configuration objects; attach the process-local OAuth manager only while
+		// resolving the reserved control model so ordinary model requests cannot start device auth.
+		let router = Arc::new(
+			router
+				.as_ref()
+				.clone()
+				.with_codex_subscription_auth(inputs.codex_oauth.clone()),
+		);
+		let resolved = match Box::pin(router.resolve(&mut req)).await {
 			model_router::ResolveResult::DirectResponse(resp) => return Ok(resp),
 			model_router::ResolveResult::Backend(resolved) => resolved,
 		};
@@ -2242,6 +2280,7 @@ async fn make_backend_call(
 			req,
 			log,
 			response_policies,
+			allow_codex_model_refresh,
 		))
 		.await;
 	}
@@ -2550,9 +2589,11 @@ async fn make_backend_call(
 				.map(|policy| policy.resolve_route(req.uri().path()))
 				.unwrap_or(llm::RouteType::Completions);
 			trace!("llm: route {} to {route_type:?}", req.uri().path());
-			let llm_provider = llm.provider.provider().to_string();
 			dtrace::trace(|trace| {
-				trace.llm_route_resolved(llm_provider.clone(), format!("{route_type:?}"))
+				trace.llm_route_resolved(
+					llm.provider.provider().to_string(),
+					format!("{route_type:?}"),
+				)
 			});
 			// First, we process the incoming request. This entails translating to the relevant provider,
 			// and parsing the request to build the LLMRequest for logging/etc, and applying LLM policies like
@@ -2683,7 +2724,7 @@ async fn make_backend_call(
 					};
 					dtrace::trace(|trace| {
 						trace.llm_request_detected(
-							llm_provider.clone(),
+							llm.provider.provider().to_string(),
 							format!("{:?}", llm_request.input_format),
 							Some(format!("{upstream_route_type:?}")),
 							llm_request.request_model.to_string(),
@@ -2728,6 +2769,18 @@ async fn make_backend_call(
 					(req, response_policies, Some(llm_request))
 				},
 				RouteType::Models => {
+					if let AIProvider::CodexSubscription(provider) = &llm.provider {
+						return codex_models_response(
+							&inputs,
+							&backend_call,
+							provider,
+							llm.path_prefix.as_deref(),
+							llm.host_override.is_some(),
+							req.uri().authority().cloned(),
+							req.headers(),
+						)
+						.await;
+					}
 					return Ok(
 						::http::Response::builder()
 							.status(::http::StatusCode::NOT_IMPLEMENTED)
@@ -2795,6 +2848,35 @@ async fn make_backend_call(
 				None,
 			)
 		};
+	if let (Some(llm), Some(llm_request)) = (
+		&backend_call.backend_policies.llm_provider,
+		llm_request.as_ref(),
+	) && let AIProvider::CodexSubscription(provider) = &llm.provider
+	{
+		if llm_request.request_model == model_router::CODEX_SUBSCRIPTION_AUTH_MODEL {
+			let chat_completions = matches!(llm_request.input_format, InputFormat::Completions);
+			return Ok(
+				model_router::codex_subscription_auth_control_response(
+					Some(inputs.codex_oauth.as_ref()),
+					chat_completions,
+					llm_request.streaming,
+				)
+				.await,
+			);
+		}
+		Box::pin(codex_admit_request(
+			&inputs,
+			&backend_call,
+			provider,
+			llm.path_prefix.as_deref(),
+			llm.host_override.is_some(),
+			req.uri().authority().cloned(),
+			req.headers(),
+			&llm_request.request_model,
+		))
+		.await?;
+		apply_codex_oauth_headers(&inputs.codex_oauth, &mut req).await?;
+	}
 	if let Some(llm) = &backend_call.backend_policies.llm_provider {
 		llm.provider.strip_browser_cors_headers(&mut req);
 		apply_auto_hostname(&mut req, &backend_call.target)?;
@@ -2806,6 +2888,23 @@ async fn make_backend_call(
 		.assert_size::<{ 2 * 1024 }>()
 		.await?;
 	}
+	let codex_refresh_context = allow_codex_model_refresh
+		.then(|| {
+			let llm = backend_call.backend_policies.llm_provider.as_ref()?;
+			let AIProvider::CodexSubscription(provider) = &llm.provider else {
+				return None;
+			};
+			let llm_request = llm_request.as_ref()?;
+			Some((
+				provider.clone(),
+				llm.path_prefix.clone(),
+				llm.host_override.is_some(),
+				req.uri().authority().cloned(),
+				req.headers().clone(),
+				llm_request.request_model.clone(),
+			))
+		})
+		.flatten();
 	if let Backend::Internal(_, internal) = backend {
 		apply_internal_path(&mut req, internal).map_err(ProxyError::Processing)?;
 		let admin = inputs.admin.clone().ok_or_else(|| {
@@ -2838,13 +2937,13 @@ async fn make_backend_call(
 	let req = req.map(|b| dtrace::TracingBody::maybe_wrap("final request", b, request_body_limit));
 	let mut call = client::Call {
 		req,
-		target: backend_call.target,
+		target: backend_call.target.clone(),
 		connection: client::ConnectionConfig {
 			transport,
 			tcp: backend_call.backend_policies.tcp.clone(),
 		},
 	};
-	let span_target = backend_call.span_target;
+	let span_target = backend_call.span_target.clone();
 	dtrace::trace(|trace| trace.backend_call_started(&call.target));
 	let upstream = inputs.upstream.clone();
 	let llm_response_log = log.as_ref().map(|l| l.llm_response.clone());
@@ -2929,6 +3028,8 @@ async fn make_backend_call(
 		),
 	});
 	let mut resp = resp?;
+	let codex_model_unavailable =
+		allow_codex_model_refresh && is_codex_model_unavailable(&mut resp).await;
 	if let Some(log) = log.as_ref() {
 		resp
 			.extensions_mut()
@@ -2975,6 +3076,23 @@ async fn make_backend_call(
 	} else {
 		resp
 	};
+	if let Some((provider, path_prefix, has_host_override, source_authority, headers, model)) =
+		codex_refresh_context
+		&& codex_model_unavailable
+		&& codex_refresh_and_admit(
+			&inputs,
+			&backend_call,
+			&provider,
+			path_prefix.as_deref(),
+			has_host_override,
+			source_authority,
+			&headers,
+			&model,
+		)
+		.await
+	{
+		resp.extensions_mut().insert(CodexModelRefresh);
+	}
 	// TODO: we currently do not support ImmediateResponse from inference router
 	if let Some(maybe_inference) = maybe_inference.as_mut() {
 		let _ = Box::pin(
@@ -2990,6 +3108,377 @@ async fn make_backend_call(
 	let response_body_limit = crate::http::response_buffer_limit(&resp);
 	let resp = resp.map(|b| dtrace::TracingBody::maybe_wrap("response", b, response_body_limit));
 	Ok(resp)
+}
+
+const CODEX_CATALOG_MAX_BYTES: usize = 1024 * 1024;
+
+async fn codex_models_response(
+	inputs: &ProxyInputs,
+	backend_call: &BackendCall,
+	provider: &agent_llm::codex_subscription::Provider,
+	path_prefix: Option<&str>,
+	has_host_override: bool,
+	source_authority: Option<Authority>,
+	headers: &HeaderMap,
+) -> Result<Response, ProxyResponse> {
+	match codex_catalog_snapshot(
+		inputs,
+		backend_call,
+		provider,
+		path_prefix,
+		has_host_override,
+		source_authority,
+		headers,
+		false,
+	)
+	.await
+	{
+		Ok(snapshot) => Ok(codex_models_list(snapshot, provider)),
+		Err(response) => Ok(response),
+	}
+}
+
+async fn codex_admit_request(
+	inputs: &ProxyInputs,
+	backend_call: &BackendCall,
+	provider: &agent_llm::codex_subscription::Provider,
+	path_prefix: Option<&str>,
+	has_host_override: bool,
+	source_authority: Option<Authority>,
+	headers: &HeaderMap,
+	model: &str,
+) -> Result<(), ProxyResponse> {
+	let snapshot = codex_catalog_snapshot(
+		inputs,
+		backend_call,
+		provider,
+		path_prefix,
+		has_host_override,
+		source_authority,
+		headers,
+		false,
+	)
+	.await
+	.map_err(|response| ProxyResponse::DirectResponse(Box::new(response)))?;
+	match snapshot
+		.catalog
+		.admit(model, &provider.allow_models, &provider.deny_models)
+	{
+		llm::codex_catalog::Admission::Allowed => Ok(()),
+		llm::codex_catalog::Admission::Unknown => Err(ProxyResponse::DirectResponse(Box::new(
+			codex_model_admission_response("Model not found", "model_not_found"),
+		))),
+		llm::codex_catalog::Admission::Denied => Err(ProxyResponse::DirectResponse(Box::new(
+			codex_model_admission_response("Model is not allowed", "model_not_allowed"),
+		))),
+	}
+}
+
+async fn codex_catalog_snapshot(
+	inputs: &ProxyInputs,
+	backend_call: &BackendCall,
+	provider: &agent_llm::codex_subscription::Provider,
+	path_prefix: Option<&str>,
+	has_host_override: bool,
+	source_authority: Option<Authority>,
+	headers: &HeaderMap,
+	force_refresh: bool,
+) -> Result<llm::codex_catalog::Snapshot, Response> {
+	let partition = codex_catalog_partition(backend_call, headers);
+	let now = std::time::Instant::now();
+	let (snapshot, state) = inputs.codex_catalog.get(&partition, now);
+	if !force_refresh && state == llm::codex_catalog::CacheState::Fresh {
+		debug!(
+			catalog_state = "fresh",
+			"serving Codex model catalog from cache"
+		);
+		return Ok(snapshot.expect("fresh cache entry"));
+	}
+
+	let etag = snapshot.as_ref().and_then(|entry| entry.etag.as_deref());
+	match fetch_codex_catalog(
+		inputs,
+		backend_call,
+		path_prefix,
+		has_host_override,
+		source_authority,
+		headers,
+		etag,
+	)
+	.await
+	{
+		Ok(CodexCatalogFetch::Updated { catalog, etag }) => {
+			debug!(catalog_state = "updated", "refreshed Codex model catalog");
+			inputs.codex_catalog.update(
+				partition.clone(),
+				catalog,
+				etag,
+				now,
+				provider.refresh_interval,
+				provider.stale_while_revalidate,
+			);
+			let (snapshot, _) = inputs.codex_catalog.get(&partition, now);
+			Ok(snapshot.expect("updated cache entry"))
+		},
+		Ok(CodexCatalogFetch::NotModified)
+			if inputs.codex_catalog.revalidate(
+				&partition,
+				now,
+				provider.refresh_interval,
+				provider.stale_while_revalidate,
+			) =>
+		{
+			debug!(
+				catalog_state = "revalidated",
+				"Codex model catalog was not modified"
+			);
+			let (snapshot, _) = inputs.codex_catalog.get(&partition, now);
+			Ok(snapshot.expect("revalidated cache entry"))
+		},
+		_ if !force_refresh && state == llm::codex_catalog::CacheState::Stale => {
+			debug!(
+				catalog_state = "stale",
+				"serving stale Codex model catalog after refresh failure"
+			);
+			Ok(snapshot.expect("stale cache entry"))
+		},
+		_ => {
+			debug!(
+				catalog_state = "unavailable",
+				"Codex model catalog refresh failed without usable cache"
+			);
+			Err(codex_catalog_unavailable())
+		},
+	}
+}
+
+async fn codex_refresh_and_admit(
+	inputs: &ProxyInputs,
+	backend_call: &BackendCall,
+	provider: &agent_llm::codex_subscription::Provider,
+	path_prefix: Option<&str>,
+	has_host_override: bool,
+	source_authority: Option<Authority>,
+	headers: &HeaderMap,
+	model: &str,
+) -> bool {
+	let Ok(snapshot) = codex_catalog_snapshot(
+		inputs,
+		backend_call,
+		provider,
+		path_prefix,
+		has_host_override,
+		source_authority,
+		headers,
+		true,
+	)
+	.await
+	else {
+		return false;
+	};
+	matches!(
+		snapshot
+			.catalog
+			.admit(model, &provider.allow_models, &provider.deny_models),
+		llm::codex_catalog::Admission::Allowed
+	)
+}
+
+async fn is_codex_model_unavailable(resp: &mut Response) -> bool {
+	if resp.status() != StatusCode::NOT_FOUND {
+		return false;
+	}
+	let Ok(http::BodyInspection::Complete(body)) = http::inspect_response_body(resp).await else {
+		return false;
+	};
+	serde_json::from_slice::<serde_json::Value>(&body)
+		.ok()
+		.and_then(|body| {
+			body
+				.pointer("/error/code")
+				.and_then(serde_json::Value::as_str)
+				.map(str::to_owned)
+		})
+		.as_deref()
+		== Some("model_not_found")
+}
+
+fn codex_model_admission_response(message: &str, code: &str) -> Response {
+	::http::Response::builder()
+		.status(StatusCode::BAD_REQUEST)
+		.header(header::CONTENT_TYPE, "application/json")
+		.body(http::Body::from(
+			serde_json::json!({
+				"error": {
+					"message": message,
+					"type": "invalid_request_error",
+					"code": code,
+				}
+			})
+			.to_string(),
+		))
+		.expect("Codex model admission response is valid")
+}
+
+fn codex_models_list(
+	snapshot: llm::codex_catalog::Snapshot,
+	provider: &agent_llm::codex_subscription::Provider,
+) -> Response {
+	::http::Response::builder()
+		.status(StatusCode::OK)
+		.header(header::CONTENT_TYPE, "application/json")
+		.header(header::CACHE_CONTROL, "private, no-cache")
+		.body(http::Body::from(
+			snapshot
+				.catalog
+				.openai_response(&provider.allow_models, &provider.deny_models),
+		))
+		.expect("Codex model response is valid")
+}
+
+fn codex_catalog_unavailable() -> Response {
+	::http::Response::builder()
+		.status(StatusCode::SERVICE_UNAVAILABLE)
+		.header(header::CONTENT_TYPE, "application/json")
+		.header(header::CACHE_CONTROL, "private, no-cache")
+		.body(http::Body::from(
+			"{\"error\":{\"message\":\"Codex model catalog is unavailable\",\"type\":\"api_error\",\"code\":\"catalog_unavailable\"}}",
+		))
+		.expect("Codex catalog error response is valid")
+}
+
+enum CodexCatalogFetch {
+	Updated {
+		catalog: llm::codex_catalog::Catalog,
+		etag: Option<String>,
+	},
+	NotModified,
+}
+
+async fn fetch_codex_catalog(
+	inputs: &ProxyInputs,
+	backend_call: &BackendCall,
+	path_prefix: Option<&str>,
+	has_host_override: bool,
+	source_authority: Option<Authority>,
+	_source_headers: &HeaderMap,
+	etag: Option<&str>,
+) -> Result<CodexCatalogFetch, ProxyResponse> {
+	let path = format!(
+		"{}{}?client_version={}",
+		path_prefix.unwrap_or("").trim_end_matches('/'),
+		agent_llm::codex_subscription::MODELS_PATH,
+		env!("CARGO_PKG_VERSION"),
+	);
+	let authority = if has_host_override {
+		source_authority.unwrap_or_else(|| Authority::from_static("catalog.invalid"))
+	} else {
+		Authority::from_static(agent_llm::codex_subscription::DEFAULT_HOST_STR)
+	};
+	let mut request = ::http::Request::builder()
+		.method(::http::Method::GET)
+		.uri(format!("http://{authority}{path}"))
+		.body(http::Body::empty())
+		.map_err(ProxyError::Http)?;
+	apply_codex_oauth_headers(&inputs.codex_oauth, &mut request).await?;
+	request
+		.headers_mut()
+		.insert(header::ACCEPT, HeaderValue::from_static("application/json"));
+	if let Some(etag) = etag
+		&& let Ok(etag) = HeaderValue::from_str(etag)
+	{
+		request.headers_mut().insert(header::IF_NONE_MATCH, etag);
+	}
+	apply_auto_hostname(&mut request, &backend_call.target)?;
+	let transport =
+		build_backend_transport(inputs, backend_call, Some(HboneSourceRole::Gateway)).await?;
+	let response = inputs
+		.upstream
+		.call(client::Call {
+			req: request,
+			target: backend_call.target.clone(),
+			connection: client::ConnectionConfig {
+				transport,
+				tcp: backend_call.backend_policies.tcp.clone(),
+			},
+		})
+		.await?;
+	if response.status() == StatusCode::NOT_MODIFIED {
+		return Ok(CodexCatalogFetch::NotModified);
+	}
+	if response.status() != StatusCode::OK {
+		return Err(ProxyError::ProcessingString("Codex catalog request failed".into()).into());
+	}
+	let etag = response
+		.headers()
+		.get(header::ETAG)
+		.and_then(|value| value.to_str().ok())
+		.map(str::to_owned);
+	let (_, body) = crate::http::compression::to_bytes_with_decompression(
+		response.into_body(),
+		None,
+		CODEX_CATALOG_MAX_BYTES,
+	)
+	.await
+	.map_err(|_| ProxyError::ProcessingString("Codex catalog response was invalid".into()))?;
+	let catalog = llm::codex_catalog::Catalog::parse(&body)
+		.map_err(|_| ProxyError::ProcessingString("Codex catalog response was invalid".into()))?;
+	Ok(CodexCatalogFetch::Updated { catalog, etag })
+}
+
+async fn apply_codex_oauth_headers(
+	manager: &llm::codex_oauth::Manager,
+	request: &mut Request,
+) -> Result<(), ProxyResponse> {
+	use secrecy::ExposeSecret;
+
+	let credential = manager
+		.credential()
+		.await
+		.map_err(|_| ProxyResponse::DirectResponse(Box::new(codex_catalog_unavailable())))?;
+	let authorization = HeaderValue::from_str(&format!(
+		"Bearer {}",
+		credential.access_token.expose_secret()
+	))
+	.map_err(|_| ProxyResponse::DirectResponse(Box::new(codex_catalog_unavailable())))?;
+	request
+		.headers_mut()
+		.insert(header::AUTHORIZATION, authorization);
+	if let Some(account_id) = credential.account_id {
+		let value = HeaderValue::from_str(&account_id)
+			.map_err(|_| ProxyResponse::DirectResponse(Box::new(codex_catalog_unavailable())))?;
+		request
+			.headers_mut()
+			.insert(HeaderName::from_static("chatgpt-account-id"), value);
+	}
+	if let Some(residency) = credential.residency {
+		let value = HeaderValue::from_str(&residency)
+			.map_err(|_| ProxyResponse::DirectResponse(Box::new(codex_catalog_unavailable())))?;
+		request.headers_mut().insert(
+			HeaderName::from_static("x-openai-internal-codex-residency"),
+			value,
+		);
+	}
+	Ok(())
+}
+
+fn codex_catalog_partition(backend_call: &BackendCall, headers: &HeaderMap) -> strng::Strng {
+	let mut digest = Sha256::new();
+	let target = format!("{:?}", backend_call.target);
+	digest.update((target.len() as u64).to_le_bytes());
+	digest.update(target.as_bytes());
+	for name in [
+		"authorization",
+		"chatgpt-account-id",
+		"x-openai-residency",
+		"x-openai-fedramp",
+	] {
+		if let Some(value) = headers.get(name) {
+			digest.update((value.as_bytes().len() as u64).to_le_bytes());
+			digest.update(value.as_bytes());
+		}
+	}
+	strng::new(hex::encode(digest.finalize()))
 }
 
 #[derive(Clone, Copy)]
@@ -4892,6 +5381,7 @@ impl PolicyClient {
 					// As such, we ensure we ONLY call this with Simple backend type which cannot be MCP/LLM
 					None,
 					&mut response_policies,
+					false,
 				)
 				.assert_size::<{ 7 * 1024 }>(),
 			);

@@ -1,3 +1,5 @@
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::Arc;
 
 use agent_core::strng;
@@ -122,11 +124,13 @@ pub struct ConditionalTarget {
 	pub when: Option<Arc<cel::Expression>>,
 }
 
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Clone, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ModelRouter {
 	models: Vec<ModelRoute>,
 	virtual_models: Vec<VirtualModelRoute>,
+	#[serde(skip)]
+	codex_subscription_auth: Option<Arc<dyn CodexSubscriptionAuth>>,
 }
 
 #[derive(Debug, Clone)]
@@ -138,6 +142,90 @@ pub struct ResolvedBackend {
 pub enum ResolveResult {
 	DirectResponse(Response),
 	Backend(ResolvedBackend),
+}
+
+/// The model name reserved for the gateway-owned Codex subscription authorization flow.
+/// It is deliberately not a route or catalog entry, so it can never reach a Codex upstream.
+pub const CODEX_SUBSCRIPTION_AUTH_MODEL: &str = "codex-subscription-auth";
+
+/// A sanitized result from a Codex OAuth device authorization action.
+///
+/// Credential management owns the device session and token persistence. The router only renders
+/// these public instructions, keeping access and refresh token material out of the response path.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CodexSubscriptionAuthState {
+	Pending {
+		verification_url: String,
+		user_code: String,
+		expires_in_seconds: u64,
+	},
+	Authorized,
+	Expired,
+	Denied,
+	Unavailable,
+}
+
+pub type CodexSubscriptionAuthFuture<'a> =
+	Pin<Box<dyn Future<Output = CodexSubscriptionAuthState> + Send + 'a>>;
+
+/// Boundary implemented by the future OAuth credential manager.
+///
+/// Each control request starts a device authorization session or polls an existing pending one.
+/// The returned state contains only values intended for the client; implementations must never
+/// return OAuth credentials through this interface.
+pub trait CodexSubscriptionAuth: Send + Sync {
+	fn start_or_poll(&self) -> CodexSubscriptionAuthFuture<'_>;
+}
+
+impl CodexSubscriptionAuth for crate::llm::codex_oauth::Manager {
+	fn start_or_poll(&self) -> CodexSubscriptionAuthFuture<'_> {
+		Box::pin(async move {
+			match self.start_or_poll().await {
+				Ok(crate::llm::codex_oauth::AuthorizationState::Pending {
+					verification_uri,
+					user_code,
+					expires_at,
+					..
+				}) => CodexSubscriptionAuthState::Pending {
+					verification_url: verification_uri,
+					user_code,
+					expires_in_seconds: expires_at
+						.duration_since(std::time::SystemTime::now())
+						.unwrap_or_default()
+						.as_secs(),
+				},
+				Ok(crate::llm::codex_oauth::AuthorizationState::Authorized) => {
+					CodexSubscriptionAuthState::Authorized
+				},
+				Ok(crate::llm::codex_oauth::AuthorizationState::Expired)
+				| Err(crate::llm::codex_oauth::OAuthError::Expired) => CodexSubscriptionAuthState::Expired,
+				Ok(crate::llm::codex_oauth::AuthorizationState::Denied)
+				| Err(crate::llm::codex_oauth::OAuthError::Denied) => CodexSubscriptionAuthState::Denied,
+				Ok(crate::llm::codex_oauth::AuthorizationState::Failed) => {
+					tracing::warn!("Codex OAuth device authorization failed");
+					CodexSubscriptionAuthState::Unavailable
+				},
+				Err(err) => {
+					tracing::warn!(%err, "Codex OAuth authorization is unavailable");
+					CodexSubscriptionAuthState::Unavailable
+				},
+			}
+		})
+	}
+}
+
+impl std::fmt::Debug for ModelRouter {
+	fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+		formatter
+			.debug_struct("ModelRouter")
+			.field("models", &self.models)
+			.field("virtual_models", &self.virtual_models)
+			.field(
+				"has_codex_subscription_auth",
+				&self.codex_subscription_auth.is_some(),
+			)
+			.finish()
+	}
 }
 
 type RouterResult<T> = Result<T, Box<Response>>;
@@ -167,7 +255,16 @@ impl ModelRouter {
 		Self {
 			models,
 			virtual_models,
+			codex_subscription_auth: None,
 		}
+	}
+
+	pub fn with_codex_subscription_auth(
+		mut self,
+		codex_subscription_auth: Arc<dyn CodexSubscriptionAuth>,
+	) -> Self {
+		self.codex_subscription_auth = Some(codex_subscription_auth);
+		self
 	}
 
 	pub async fn resolve(&self, req: &mut Request) -> ResolveResult {
@@ -178,6 +275,16 @@ impl ModelRouter {
 			Ok(requested_model) => requested_model,
 			Err(resp) => return ResolveResult::DirectResponse(*resp),
 		};
+		if requested_model.model == CODEX_SUBSCRIPTION_AUTH_MODEL
+			&& is_codex_subscription_auth_request(req)
+		{
+			let chat_completions = req.uri().path().trim_end_matches('/') == "/v1/chat/completions";
+			return ResolveResult::DirectResponse(
+				self
+					.codex_subscription_auth_response(chat_completions, requested_model.location)
+					.await,
+			);
+		}
 		if !api_key_model_authorized(req, &requested_model.model) {
 			return ResolveResult::DirectResponse(api_key_model_authorization_denied_response());
 		}
@@ -209,6 +316,26 @@ impl ModelRouter {
 			Ok(None) => ResolveResult::DirectResponse(model_not_found_response()),
 			Err(()) => ResolveResult::DirectResponse(model_authorization_denied_response()),
 		}
+	}
+
+	async fn codex_subscription_auth_response(
+		&self,
+		chat_completions: bool,
+		location: RequestedModelLocation,
+	) -> Response {
+		let Some(body) = location.llm_request() else {
+			return llm_error_response(
+				::http::StatusCode::BAD_REQUEST,
+				"Codex subscription authentication requires a JSON request body",
+				"codex_subscription_auth_invalid_request",
+			);
+		};
+		codex_subscription_auth_control_response(
+			self.codex_subscription_auth.as_deref(),
+			chat_completions,
+			body.get("stream").and_then(Value::as_bool).unwrap_or(false),
+		)
+		.await
 	}
 
 	fn model_list_response(&self, req: &Request) -> Response {
@@ -394,6 +521,128 @@ fn llm_error_response(status: ::http::StatusCode, message: &str, code: &str) -> 
 			.to_string(),
 		))
 		.expect("LLM error response is valid")
+}
+
+fn is_codex_subscription_auth_request(req: &Request) -> bool {
+	req.method() == ::http::Method::POST
+		&& matches!(
+			req.uri().path().trim_end_matches('/'),
+			"/v1/chat/completions" | "/v1/responses"
+		)
+}
+
+/// Renders the reserved Codex subscription authorization control response.
+///
+/// This accepts only the OAuth manager boundary and request properties needed to select the
+/// public response shape, so direct Codex backends can use the same state without exposing
+/// credentials or entering catalog admission.
+pub async fn codex_subscription_auth_control_response(
+	auth: Option<&dyn CodexSubscriptionAuth>,
+	chat_completions: bool,
+	streaming: bool,
+) -> Response {
+	if streaming {
+		return llm_error_response(
+			::http::StatusCode::BAD_REQUEST,
+			"Streaming is not supported by the codex-subscription-auth control model",
+			"codex_subscription_auth_streaming_unsupported",
+		);
+	}
+	let state = match auth {
+		Some(auth) => auth.start_or_poll().await,
+		None => CodexSubscriptionAuthState::Unavailable,
+	};
+	let instruction = codex_subscription_auth_instruction(state);
+	if chat_completions {
+		chat_completion_control_response(&instruction)
+	} else {
+		responses_control_response(&instruction)
+	}
+}
+
+fn codex_subscription_auth_instruction(state: CodexSubscriptionAuthState) -> String {
+	let instruction = match state {
+		CodexSubscriptionAuthState::Pending {
+			verification_url,
+			user_code,
+			expires_in_seconds,
+		} => serde_json::json!({
+			"status": "pending",
+			"verification_url": verification_url,
+			"user_code": user_code,
+			"expires_in_seconds": expires_in_seconds,
+		}),
+		CodexSubscriptionAuthState::Authorized => serde_json::json!({
+			"status": "authorized",
+			"message": "Codex subscription authorization is complete.",
+		}),
+		CodexSubscriptionAuthState::Expired => serde_json::json!({
+			"status": "expired",
+			"message": "Codex subscription authorization expired. Call this model again to start a new authorization session.",
+		}),
+		CodexSubscriptionAuthState::Denied => serde_json::json!({
+			"status": "denied",
+			"message": "Codex subscription authorization was denied. Call this model again to start a new authorization session.",
+		}),
+		CodexSubscriptionAuthState::Unavailable => serde_json::json!({
+			"status": "unavailable",
+			"message": "Codex subscription authorization is not configured on this gateway.",
+		}),
+	};
+	serde_json::to_string(&instruction).expect("Codex auth instruction is serializable")
+}
+
+fn control_response_created_at() -> u64 {
+	std::time::SystemTime::now()
+		.duration_since(std::time::UNIX_EPOCH)
+		.unwrap_or_default()
+		.as_secs()
+}
+
+fn chat_completion_control_response(instruction: &str) -> Response {
+	let body = serde_json::json!({
+		"id": "codex-subscription-auth",
+		"object": "chat.completion",
+		"created": control_response_created_at(),
+		"model": CODEX_SUBSCRIPTION_AUTH_MODEL,
+		"choices": [{
+			"index": 0,
+			"message": {"role": "assistant", "content": instruction},
+			"finish_reason": "stop",
+		}],
+	});
+	::http::Response::builder()
+		.status(::http::StatusCode::OK)
+		.header(::http::header::CONTENT_TYPE, "application/json")
+		.body(http::Body::from(body.to_string()))
+		.expect("Codex auth Chat Completions response is valid")
+}
+
+fn responses_control_response(instruction: &str) -> Response {
+	let body = serde_json::json!({
+		"id": "resp_codex_subscription_auth",
+		"object": "response",
+		"created_at": control_response_created_at(),
+		"status": "completed",
+		"model": CODEX_SUBSCRIPTION_AUTH_MODEL,
+		"output": [{
+			"id": "msg_codex_subscription_auth",
+			"type": "message",
+			"status": "completed",
+			"role": "assistant",
+			"content": [{
+				"type": "output_text",
+				"text": instruction,
+				"annotations": [],
+			}],
+		}],
+		"output_text": instruction,
+	});
+	::http::Response::builder()
+		.status(::http::StatusCode::OK)
+		.header(::http::header::CONTENT_TYPE, "application/json")
+		.body(http::Body::from(body.to_string()))
+		.expect("Codex auth Responses response is valid")
 }
 
 fn model_authorized(model: &ModelRoute, req: &Request) -> bool {
@@ -761,9 +1010,214 @@ async fn body_bytes(req: &mut Request) -> RouterResult<Bytes> {
 
 #[cfg(test)]
 mod tests {
+	use std::sync::atomic::{AtomicUsize, Ordering};
+
 	use super::*;
 	use crate::transport::BufferLimit;
 	use crate::types::agent::RouteBackendTarget;
+
+	#[derive(Debug)]
+	struct TestCodexSubscriptionAuth(CodexSubscriptionAuthState);
+
+	impl CodexSubscriptionAuth for TestCodexSubscriptionAuth {
+		fn start_or_poll(&self) -> CodexSubscriptionAuthFuture<'_> {
+			Box::pin(std::future::ready(self.0.clone()))
+		}
+	}
+
+	#[derive(Default)]
+	struct CountingCodexSubscriptionAuth(AtomicUsize);
+
+	impl CodexSubscriptionAuth for CountingCodexSubscriptionAuth {
+		fn start_or_poll(&self) -> CodexSubscriptionAuthFuture<'_> {
+			self.0.fetch_add(1, Ordering::Relaxed);
+			Box::pin(std::future::ready(CodexSubscriptionAuthState::Unavailable))
+		}
+	}
+
+	struct PendingThenDeniedCodexEndpoint;
+
+	#[async_trait::async_trait]
+	impl crate::llm::codex_oauth::TokenEndpoint for PendingThenDeniedCodexEndpoint {
+		async fn begin_device_authorization(
+			&self,
+			_request: crate::llm::codex_oauth::DeviceAuthorizationRequest,
+		) -> Result<
+			crate::llm::codex_oauth::DeviceAuthorizationResponse,
+			crate::llm::codex_oauth::OAuthError,
+		> {
+			Ok(crate::llm::codex_oauth::DeviceAuthorizationResponse {
+				verification_uri: "https://auth.example.test/device".to_string(),
+				verification_uri_complete: Some("https://auth.example.test/device?code=secret".to_string()),
+				user_code: "USER-CODE".to_string(),
+				device_code: secrecy::SecretString::from("device-code"),
+				expires_in: std::time::Duration::from_secs(60),
+				interval: std::time::Duration::from_secs(1),
+			})
+		}
+
+		async fn poll_device_authorization(
+			&self,
+			_device_code: &secrecy::SecretString,
+			_user_code: &str,
+		) -> Result<crate::llm::codex_oauth::DevicePoll, crate::llm::codex_oauth::OAuthError> {
+			Ok(crate::llm::codex_oauth::DevicePoll::Denied)
+		}
+
+		async fn exchange_authorization_code(
+			&self,
+			_authorization_code: &secrecy::SecretString,
+			_pkce_verifier: &secrecy::SecretString,
+		) -> Result<crate::llm::codex_oauth::TokenResponse, crate::llm::codex_oauth::OAuthError> {
+			Err(crate::llm::codex_oauth::OAuthError::InvalidResponse)
+		}
+
+		async fn refresh(
+			&self,
+			_refresh_token: &secrecy::SecretString,
+		) -> Result<crate::llm::codex_oauth::TokenResponse, crate::llm::codex_oauth::OAuthError> {
+			Err(crate::llm::codex_oauth::OAuthError::CredentialUnavailable)
+		}
+	}
+
+	async fn response_json(response: Response) -> Value {
+		let body = http::read_body_with_limit(response.into_body(), 16 * 1024)
+			.await
+			.expect("response body");
+		serde_json::from_slice(&body).expect("JSON response")
+	}
+
+	#[tokio::test]
+	async fn codex_subscription_auth_returns_chat_completions_control_response() {
+		let router = ModelRouter::new(vec![], vec![]).with_codex_subscription_auth(Arc::new(
+			TestCodexSubscriptionAuth(CodexSubscriptionAuthState::Pending {
+				verification_url: "https://auth.example.test/device?flow=codex".to_string(),
+				user_code: "ABCD-EFGH".to_string(),
+				expires_in_seconds: 600,
+			}),
+		));
+		let mut req = ::http::Request::builder()
+			.method(::http::Method::POST)
+			.uri("http://example.com/v1/chat/completions")
+			.body(http::Body::from(
+				r#"{"model":"codex-subscription-auth","messages":[]}"#,
+			))
+			.expect("valid request");
+
+		let ResolveResult::DirectResponse(response) = router.resolve(&mut req).await else {
+			panic!("control model must not resolve a backend");
+		};
+		assert_eq!(response.status(), ::http::StatusCode::OK);
+		let response = response_json(response).await;
+		assert_eq!(response["object"], "chat.completion");
+		assert_eq!(response["model"], CODEX_SUBSCRIPTION_AUTH_MODEL);
+		assert_eq!(response["choices"][0]["message"]["role"], "assistant");
+		let instruction: Value = serde_json::from_str(
+			response["choices"][0]["message"]["content"]
+				.as_str()
+				.expect("assistant content"),
+		)
+		.expect("JSON-safe instruction");
+		assert_eq!(instruction["status"], "pending");
+		assert_eq!(instruction["user_code"], "ABCD-EFGH");
+		assert!(instruction.get("access_token").is_none());
+		assert!(instruction.get("refresh_token").is_none());
+	}
+
+	#[tokio::test]
+	async fn codex_subscription_auth_returns_responses_control_response() {
+		let router = ModelRouter::new(vec![], vec![]).with_codex_subscription_auth(Arc::new(
+			TestCodexSubscriptionAuth(CodexSubscriptionAuthState::Authorized),
+		));
+		let mut req = ::http::Request::builder()
+			.method(::http::Method::POST)
+			.uri("http://example.com/v1/responses")
+			.body(http::Body::from(
+				r#"{"model":"codex-subscription-auth","input":"authorize"}"#,
+			))
+			.expect("valid request");
+
+		let ResolveResult::DirectResponse(response) = router.resolve(&mut req).await else {
+			panic!("control model must not resolve a backend");
+		};
+		let response = response_json(response).await;
+		assert_eq!(response["object"], "response");
+		assert_eq!(response["status"], "completed");
+		assert_eq!(response["output"][0]["role"], "assistant");
+		let instruction: Value = serde_json::from_str(
+			response["output"][0]["content"][0]["text"]
+				.as_str()
+				.expect("assistant output text"),
+		)
+		.expect("JSON-safe instruction");
+		assert_eq!(instruction["status"], "authorized");
+	}
+
+	#[tokio::test]
+	async fn codex_oauth_manager_adapter_starts_and_polls_device_authorization() {
+		let manager = crate::llm::codex_oauth::Manager::new(
+			Arc::new(PendingThenDeniedCodexEndpoint),
+			Arc::new(crate::llm::codex_oauth::MemoryCredentialStore::default()),
+		);
+
+		assert!(matches!(
+			CodexSubscriptionAuth::start_or_poll(&manager).await,
+			CodexSubscriptionAuthState::Pending {
+				ref verification_url,
+				ref user_code,
+				expires_in_seconds,
+			} if verification_url == "https://auth.example.test/device"
+				&& user_code == "USER-CODE"
+				&& expires_in_seconds > 0
+		));
+		assert_eq!(
+			CodexSubscriptionAuth::start_or_poll(&manager).await,
+			CodexSubscriptionAuthState::Denied
+		);
+	}
+
+	#[tokio::test]
+	async fn codex_subscription_auth_rejects_streaming_without_calling_hook() {
+		let router = ModelRouter::new(vec![], vec![]);
+		let mut req = ::http::Request::builder()
+			.method(::http::Method::POST)
+			.uri("http://example.com/v1/chat/completions")
+			.body(http::Body::from(
+				r#"{"model":"codex-subscription-auth","messages":[],"stream":true}"#,
+			))
+			.expect("valid request");
+
+		let ResolveResult::DirectResponse(response) = router.resolve(&mut req).await else {
+			panic!("streaming control model must not resolve a backend");
+		};
+		assert_eq!(response.status(), ::http::StatusCode::BAD_REQUEST);
+		let response = response_json(response).await;
+		assert_eq!(
+			response["error"]["code"],
+			"codex_subscription_auth_streaming_unsupported"
+		);
+	}
+
+	#[tokio::test]
+	async fn normal_models_keep_existing_resolution_behavior() {
+		let auth = Arc::new(CountingCodexSubscriptionAuth::default());
+		let router = ModelRouter::new(vec![], vec![]).with_codex_subscription_auth(auth.clone());
+		let mut req = ::http::Request::builder()
+			.method(::http::Method::POST)
+			.uri("http://example.com/v1/chat/completions")
+			.body(http::Body::from(
+				r#"{"model":"normal-model","messages":[]}"#,
+			))
+			.expect("valid request");
+
+		let ResolveResult::DirectResponse(response) = router.resolve(&mut req).await else {
+			panic!("unknown normal model must remain a direct not-found response");
+		};
+		assert_eq!(response.status(), ::http::StatusCode::NOT_FOUND);
+		let response = response_json(response).await;
+		assert_eq!(response["error"]["code"], "model_not_found");
+		assert_eq!(auth.0.load(Ordering::Relaxed), 0);
+	}
 
 	#[tokio::test]
 	async fn conditional_virtual_model_can_use_llm_request() {

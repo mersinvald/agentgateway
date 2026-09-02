@@ -368,6 +368,11 @@ type BackendEviction struct {
 type BackendWithAI struct {
 	BackendSimple `json:",inline"`
 
+	// Credentials for a codexSubscription provider. This policy is only valid
+	// when the selected AI provider is codexSubscription.
+	// +optional
+	CodexSubscriptionAuth *CodexSubscriptionAuth `json:"codexSubscriptionAuth,omitempty"`
+
 	// Settings for AI workloads. This is only applicable when
 	// connecting to a `Backend` of type `ai`.
 	// +optional
@@ -385,6 +390,11 @@ type BackendWithAI struct {
 // +kubebuilder:validation:AtLeastOneFieldSet
 type BackendFull struct {
 	BackendSimple `json:",inline"`
+
+	// Credentials for a codexSubscription provider. This policy is only valid
+	// when the selected AI provider is codexSubscription.
+	// +optional
+	CodexSubscriptionAuth *CodexSubscriptionAuth `json:"codexSubscriptionAuth,omitempty"`
 
 	// Settings for AI workloads. This is only applicable when
 	// connecting to a `Backend` of type `ai`.
@@ -409,6 +419,34 @@ type BackendFull struct {
 	// +optional
 	// +kubebuilder:validation:XValidation:rule="[has(self.backendRef),has(self.url)].filter(x,x==true).size() == 1",message="exactly one of backendRef or url must be set"
 	ExtAuth *ExtAuth `json:"extAuth,omitempty"`
+}
+
+// CodexSubscriptionAuth selects the refresh-capable OAuth credential record
+// used by a codexSubscription provider. The controller sends only this opaque
+// reference and its generation to xDS; OAuth token material never leaves the
+// credential store.
+type CodexSubscriptionAuth struct {
+	// CredentialRef identifies the OAuth credential record managed by the
+	// runtime credential store.
+	// +required
+	CredentialRef CodexOAuthCredentialRef `json:"credentialRef"`
+}
+
+// CodexOAuthCredentialRef identifies a refresh-capable OAuth credential
+// record. ID is opaque to the controller and data plane; Generation changes
+// whenever the record's usable credential context is replaced.
+type CodexOAuthCredentialRef struct {
+	// ID is the opaque credential-store record identifier.
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=256
+	// +required
+	ID string `json:"id"`
+
+	// Generation is the credential-store record generation.
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=256
+	// +required
+	Generation string `json:"generation"`
 }
 
 // +kubebuilder:validation:MinLength=1

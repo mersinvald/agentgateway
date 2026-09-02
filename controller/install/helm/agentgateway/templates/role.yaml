@@ -12,10 +12,21 @@ rules:
   - pods
   - services
   - configmaps # Used for reference configs in policies/TLS/API keys, etc
-  - secrets # Used for reference configs in policies/TLS/API keys, etc
   verbs:
   - get
   - list
+  - watch
+
+# Persists the controller-encrypted shared Codex OAuth credential. This is
+# separate from read-only Secret references above to keep the write scope clear.
+- apiGroups: [""]
+  resources:
+  - secrets
+  verbs:
+  - create
+  - get
+  - list
+  - update
   - watch
 
 - apiGroups:

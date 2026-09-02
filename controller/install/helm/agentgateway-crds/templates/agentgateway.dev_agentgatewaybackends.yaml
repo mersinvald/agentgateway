@@ -236,6 +236,76 @@ spec:
                                     pattern: ^[a-z0-9-]+$
                                     type: string
                                 type: object
+                              codexSubscription:
+                                description: |-
+                                  CodexSubscription uses a shared ChatGPT subscription credential and its
+                                  authenticated upstream catalog. The client request always supplies the
+                                  model ID; no static Codex model list or model override is configured here.
+                                properties:
+                                  catalog:
+                                    description: Catalog controls authenticated upstream
+                                      model discovery.
+                                    properties:
+                                      refreshInterval:
+                                        default: 5m
+                                        description: RefreshInterval is the period
+                                          a successful catalog remains fresh.
+                                        maxLength: 32
+                                        pattern: ^([0-9]{1,5}(h|m|s|ms)){1,4}$
+                                        type: string
+                                      staleWhileRevalidate:
+                                        default: 1h
+                                        description: |-
+                                          StaleWhileRevalidate is the maximum additional period a last-known-good
+                                          catalog can be served while refresh is retried.
+                                        maxLength: 32
+                                        pattern: ^([0-9]{1,5}(h|m|s|ms)){1,4}$
+                                        type: string
+                                    type: object
+                                  models:
+                                    description: Models restricts the usable upstream
+                                      catalog. Deny entries take precedence.
+                                    properties:
+                                      allow:
+                                        description: Allow is an optional local allowlist.
+                                          When unset, all usable upstream models are
+                                          allowed.
+                                        items:
+                                          maxLength: 64
+                                          minLength: 1
+                                          type: string
+                                        maxItems: 8
+                                        type: array
+                                      deny:
+                                        description: Deny blocks matching models even
+                                          when allow permits them.
+                                        items:
+                                          maxLength: 64
+                                          minLength: 1
+                                          type: string
+                                        maxItems: 8
+                                        type: array
+                                    type: object
+                                    x-kubernetes-validations:
+                                    - message: allow entries must be exact, prefix*,
+                                        *suffix, or *
+                                      rule: self.allow.all(v, v == '*' || v.matches("^[^*]+[*]?$")
+                                        || v.matches("^[*][^*]+$"))
+                                    - message: deny entries must be exact, prefix*,
+                                        *suffix, or *
+                                      rule: self.deny.all(v, v == '*' || v.matches("^[^*]+[*]?$")
+                                        || v.matches("^[*][^*]+$"))
+                                type: object
+                                x-kubernetes-validations:
+                                - message: catalog.refreshInterval must be at least
+                                    1 second
+                                  rule: '!has(self.catalog) || !has(self.catalog.refreshInterval)
+                                    || duration(self.catalog.refreshInterval) >= duration(''1s'')'
+                                - message: catalog.staleWhileRevalidate must be at
+                                    least 1 second
+                                  rule: '!has(self.catalog) || !has(self.catalog.staleWhileRevalidate)
+                                    || duration(self.catalog.staleWhileRevalidate)
+                                    >= duration(''1s'')'
                               custom:
                                 description: |-
                                   Custom provider configures a non-managed or self-hosted LLM provider.
@@ -6269,6 +6339,35 @@ spec:
                                         crossAppAccess jwtSign] may be set
                                       rule: '[has(self.key),has(self.secretRef),has(self.passthrough),has(self.aws),has(self.azure),has(self.gcp),has(self.oauthTokenExchange),has(self.crossAppAccess),has(self.jwtSign)].filter(x,x==true).size()
                                         <= 1'
+                                  codexSubscriptionAuth:
+                                    description: |-
+                                      Credentials for a codexSubscription provider. This policy is only valid
+                                      when the selected AI provider is codexSubscription.
+                                    properties:
+                                      credentialRef:
+                                        description: |-
+                                          CredentialRef identifies the OAuth credential record managed by the
+                                          runtime credential store.
+                                        properties:
+                                          generation:
+                                            description: Generation is the credential-store
+                                              record generation.
+                                            maxLength: 256
+                                            minLength: 1
+                                            type: string
+                                          id:
+                                            description: ID is the opaque credential-store
+                                              record identifier.
+                                            maxLength: 256
+                                            minLength: 1
+                                            type: string
+                                        required:
+                                        - generation
+                                        - id
+                                        type: object
+                                    required:
+                                    - credentialRef
+                                    type: object
                                   health:
                                     description: Settings for passive and active health
                                       checking.
@@ -6928,9 +7027,9 @@ spec:
                                 type: object
                                 x-kubernetes-validations:
                                 - message: at least one of the fields in [ai auth
-                                    health http tcp tls transformation tunnel] must
-                                    be set
-                                  rule: '[has(self.ai),has(self.auth),has(self.health),has(self.http),has(self.tcp),has(self.tls),has(self.transformation),has(self.tunnel)].filter(x,x==true).size()
+                                    codexSubscriptionAuth health http tcp tls transformation
+                                    tunnel] must be set
+                                  rule: '[has(self.ai),has(self.auth),has(self.codexSubscriptionAuth),has(self.health),has(self.http),has(self.tcp),has(self.tls),has(self.transformation),has(self.tunnel)].filter(x,x==true).size()
                                     >= 1'
                               port:
                                 description: Port to send requests to.
@@ -6987,9 +7086,9 @@ spec:
                             - message: pathPrefix requires host to be set
                               rule: 'has(self.pathPrefix) ? has(self.host) : true'
                             - message: exactly one of the fields in [openai azureopenai
-                                azure anthropic gemini vertexai bedrock custom] must
-                                be set
-                              rule: '[has(self.openai),has(self.azureopenai),has(self.azure),has(self.anthropic),has(self.gemini),has(self.vertexai),has(self.bedrock),has(self.custom)].filter(x,x==true).size()
+                                azure anthropic gemini vertexai bedrock custom codexSubscription]
+                                must be set
+                              rule: '[has(self.openai),has(self.azureopenai),has(self.azure),has(self.anthropic),has(self.gemini),has(self.vertexai),has(self.bedrock),has(self.custom),has(self.codexSubscription)].filter(x,x==true).size()
                                 == 1'
                           maxItems: 16
                           minItems: 1
@@ -7147,6 +7246,73 @@ spec:
                             pattern: ^[a-z0-9-]+$
                             type: string
                         type: object
+                      codexSubscription:
+                        description: |-
+                          CodexSubscription uses a shared ChatGPT subscription credential and its
+                          authenticated upstream catalog. The client request always supplies the
+                          model ID; no static Codex model list or model override is configured here.
+                        properties:
+                          catalog:
+                            description: Catalog controls authenticated upstream model
+                              discovery.
+                            properties:
+                              refreshInterval:
+                                default: 5m
+                                description: RefreshInterval is the period a successful
+                                  catalog remains fresh.
+                                maxLength: 32
+                                pattern: ^([0-9]{1,5}(h|m|s|ms)){1,4}$
+                                type: string
+                              staleWhileRevalidate:
+                                default: 1h
+                                description: |-
+                                  StaleWhileRevalidate is the maximum additional period a last-known-good
+                                  catalog can be served while refresh is retried.
+                                maxLength: 32
+                                pattern: ^([0-9]{1,5}(h|m|s|ms)){1,4}$
+                                type: string
+                            type: object
+                          models:
+                            description: Models restricts the usable upstream catalog.
+                              Deny entries take precedence.
+                            properties:
+                              allow:
+                                description: Allow is an optional local allowlist.
+                                  When unset, all usable upstream models are allowed.
+                                items:
+                                  maxLength: 64
+                                  minLength: 1
+                                  type: string
+                                maxItems: 8
+                                type: array
+                              deny:
+                                description: Deny blocks matching models even when
+                                  allow permits them.
+                                items:
+                                  maxLength: 64
+                                  minLength: 1
+                                  type: string
+                                maxItems: 8
+                                type: array
+                            type: object
+                            x-kubernetes-validations:
+                            - message: allow entries must be exact, prefix*, *suffix,
+                                or *
+                              rule: self.allow.all(v, v == '*' || v.matches("^[^*]+[*]?$")
+                                || v.matches("^[*][^*]+$"))
+                            - message: deny entries must be exact, prefix*, *suffix,
+                                or *
+                              rule: self.deny.all(v, v == '*' || v.matches("^[^*]+[*]?$")
+                                || v.matches("^[*][^*]+$"))
+                        type: object
+                        x-kubernetes-validations:
+                        - message: catalog.refreshInterval must be at least 1 second
+                          rule: '!has(self.catalog) || !has(self.catalog.refreshInterval)
+                            || duration(self.catalog.refreshInterval) >= duration(''1s'')'
+                        - message: catalog.staleWhileRevalidate must be at least 1
+                            second
+                          rule: '!has(self.catalog) || !has(self.catalog.staleWhileRevalidate)
+                            || duration(self.catalog.staleWhileRevalidate) >= duration(''1s'')'
                       custom:
                         description: |-
                           Custom provider configures a non-managed or self-hosted LLM provider.
@@ -7405,8 +7571,9 @@ spec:
                     - message: pathPrefix requires host to be set
                       rule: 'has(self.pathPrefix) ? has(self.host) : true'
                     - message: exactly one of the fields in [openai azureopenai azure
-                        anthropic gemini vertexai bedrock custom] must be set
-                      rule: '[has(self.openai),has(self.azureopenai),has(self.azure),has(self.anthropic),has(self.gemini),has(self.vertexai),has(self.bedrock),has(self.custom)].filter(x,x==true).size()
+                        anthropic gemini vertexai bedrock custom codexSubscription]
+                        must be set
+                      rule: '[has(self.openai),has(self.azureopenai),has(self.azure),has(self.anthropic),has(self.gemini),has(self.vertexai),has(self.bedrock),has(self.custom),has(self.codexSubscription)].filter(x,x==true).size()
                         == 1'
                 type: object
                 x-kubernetes-validations:
@@ -15007,6 +15174,35 @@ spec:
                         be set
                       rule: '[has(self.key),has(self.secretRef),has(self.passthrough),has(self.aws),has(self.azure),has(self.gcp),has(self.oauthTokenExchange),has(self.crossAppAccess),has(self.jwtSign)].filter(x,x==true).size()
                         <= 1'
+                  codexSubscriptionAuth:
+                    description: |-
+                      Credentials for a codexSubscription provider. This policy is only valid
+                      when the selected AI provider is codexSubscription.
+                    properties:
+                      credentialRef:
+                        description: |-
+                          CredentialRef identifies the OAuth credential record managed by the
+                          runtime credential store.
+                        properties:
+                          generation:
+                            description: Generation is the credential-store record
+                              generation.
+                            maxLength: 256
+                            minLength: 1
+                            type: string
+                          id:
+                            description: ID is the opaque credential-store record
+                              identifier.
+                            maxLength: 256
+                            minLength: 1
+                            type: string
+                        required:
+                        - generation
+                        - id
+                        type: object
+                    required:
+                    - credentialRef
+                    type: object
                   extAuth:
                     description: |-
                       External authentication configuration for requests
@@ -16325,9 +16521,10 @@ spec:
                       rule: '!has(self.url) || self.url.matches(''^https?://[^/?#]+$'')'
                 type: object
                 x-kubernetes-validations:
-                - message: at least one of the fields in [ai auth extAuth health http
-                    mcp tcp tls transformation tunnel] must be set
-                  rule: '[has(self.ai),has(self.auth),has(self.extAuth),has(self.health),has(self.http),has(self.mcp),has(self.tcp),has(self.tls),has(self.transformation),has(self.tunnel)].filter(x,x==true).size()
+                - message: at least one of the fields in [ai auth codexSubscriptionAuth
+                    extAuth health http mcp tcp tls transformation tunnel] must be
+                    set
+                  rule: '[has(self.ai),has(self.auth),has(self.codexSubscriptionAuth),has(self.extAuth),has(self.health),has(self.http),has(self.mcp),has(self.tcp),has(self.tls),has(self.transformation),has(self.tunnel)].filter(x,x==true).size()
                     >= 1'
               static:
                 description: Static hostname, IP address, or Unix Domain Socket backend.

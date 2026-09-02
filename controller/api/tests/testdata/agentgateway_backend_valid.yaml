@@ -10,6 +10,20 @@ spec:
 apiVersion: agentgateway.dev/v1alpha1
 kind: AgentgatewayBackend
 metadata:
+  name: codex-oauth-credential-reference
+spec:
+  policies:
+    codexSubscriptionAuth:
+      credentialRef:
+        id: codex-oauth-record-primary
+        generation: "42"
+  ai:
+    provider:
+      codexSubscription: {}
+---
+apiVersion: agentgateway.dev/v1alpha1
+kind: AgentgatewayBackend
+metadata:
   name: ai-full
 spec:
   ai:

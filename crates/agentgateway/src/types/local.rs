@@ -4207,6 +4207,7 @@ fn ensure_ai_provider_model(provider: &mut AIProvider, model: &str) {
 	match provider {
 		AIProvider::Anthropic(p) => p.model = p.model.clone().or_else(model),
 		AIProvider::OpenAI(p) => p.model = p.model.clone().or_else(model),
+		AIProvider::CodexSubscription(_) => {},
 		AIProvider::Copilot(p) => p.model = p.model.clone().or_else(model),
 		AIProvider::Gemini(p) => p.model = p.model.clone().or_else(model),
 		AIProvider::Custom(p) => p.model = p.model.clone().or_else(model),

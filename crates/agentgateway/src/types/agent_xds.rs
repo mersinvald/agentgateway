@@ -18,6 +18,7 @@ use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::num::NonZeroU16;
 use std::sync::Arc;
+use std::time::Duration;
 
 use ::http::{HeaderName, StatusCode};
 use frozen_collections::FzHashSet;
@@ -127,6 +128,7 @@ fn override_ai_provider_model(provider: &mut AIProvider, model: &str) {
 	match provider {
 		AIProvider::Anthropic(provider) => provider.model = model,
 		AIProvider::OpenAI(provider) => provider.model = model,
+		AIProvider::CodexSubscription(_) => {},
 		AIProvider::Copilot(provider) => provider.model = model,
 		AIProvider::Gemini(provider) => provider.model = model,
 		AIProvider::Custom(provider) => provider.model = model,
@@ -1883,6 +1885,26 @@ pub(crate) fn backend_with_policies_from_proto(
 								moderation,
 							})
 						},
+						Some(provider::Provider::CodexSubscription(codex)) => {
+							AIProvider::CodexSubscription(llm::codex_subscription::Provider {
+								refresh_interval: codex
+									.refresh_interval
+									.clone()
+									.map(convert_duration)
+									.unwrap_or(Duration::from_secs(5 * 60)),
+								stale_while_revalidate: codex
+									.stale_while_revalidate
+									.clone()
+									.map(convert_duration)
+									.unwrap_or(Duration::from_secs(60 * 60)),
+								allow_models: if codex.allow_models.is_empty() {
+									vec![strng::literal!("*")]
+								} else {
+									codex.allow_models.iter().map(strng::new).collect()
+								},
+								deny_models: codex.deny_models.iter().map(strng::new).collect(),
+							})
+						},
 						Some(provider::Provider::Gemini(gemini)) => AIProvider::Gemini(llm::gemini::Provider {
 							model: gemini.model.as_deref().map(strng::new),
 						}),
@@ -2336,6 +2358,17 @@ fn backend_policy_from_proto(
 			BackendTrafficPolicy::BackendAuth(BackendAuth {
 				kind: auth_kind,
 				credentials,
+			})
+		},
+		Some(bps::Kind::CodexSubscriptionAuth(auth)) => {
+			// OAuth token material intentionally never travels in xDS. The opaque
+			// credential reference is resolved immediately before Codex catalog or
+			// inference transport by the runtime credential manager.
+			let _credential_id = &auth.credential_id;
+			let _generation = &auth.generation;
+			BackendTrafficPolicy::BackendAuth(BackendAuth {
+				kind: None,
+				credentials: vec![],
 			})
 		},
 		Some(bps::Kind::McpAuthorization(rbac)) => {

@@ -827,6 +827,8 @@ pub struct ProxyInputs {
 
 	pub metrics: Arc<metrics::Metrics>,
 	pub model_catalog: Arc<llm::catalog::ModelCatalog>,
+	pub codex_catalog: Arc<llm::codex_catalog::Cache>,
+	pub codex_oauth: Arc<llm::codex_oauth::Manager>,
 
 	pub admin: Option<management::admin::AdminService>,
 	pub mcp_state: mcp::App,
@@ -857,6 +859,8 @@ impl ProxyInputs {
 			upstream,
 			metrics,
 			model_catalog: Arc::new(model_catalog.unwrap_or_default()),
+			codex_catalog: Arc::new(llm::codex_catalog::Cache::default()),
+			codex_oauth: Arc::new(llm::codex_oauth::Manager::unavailable()),
 			admin: None,
 			mcp_state,
 			ca,

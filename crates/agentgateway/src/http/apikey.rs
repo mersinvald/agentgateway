@@ -226,12 +226,7 @@ impl AllowedModels {
 
 impl AllowedModelPattern {
 	fn allows(&self, model: &str) -> bool {
-		match self {
-			Self::Exact(exact) => model == exact,
-			Self::Prefix(prefix) => model.starts_with(prefix),
-			Self::Suffix(suffix) => model.ends_with(suffix),
-			Self::All => true,
-		}
+		model_pattern_matches(self.as_pattern().as_str(), model)
 	}
 
 	fn intersects(&self, configured_model: &str) -> bool {
@@ -257,6 +252,33 @@ impl AllowedModelPattern {
 				configured_model.ends_with('*') || configured_model.ends_with(allowed)
 			},
 		}
+	}
+}
+
+impl AllowedModelPattern {
+	fn as_pattern(&self) -> String {
+		match self {
+			Self::Exact(value) => value.clone(),
+			Self::Prefix(value) => format!("{value}*"),
+			Self::Suffix(value) => format!("*{value}"),
+			Self::All => "*".to_string(),
+		}
+	}
+}
+
+/// Matches the gateway's case-sensitive model wildcard grammar: an exact ID,
+/// a trailing prefix wildcard, a leading suffix wildcard, or `*`.
+pub fn model_pattern_matches(pattern: &str, model: &str) -> bool {
+	match pattern {
+		"*" => true,
+		_ if pattern.starts_with('*') && pattern.matches('*').count() == 1 => {
+			model.ends_with(&pattern[1..])
+		},
+		_ if pattern.ends_with('*') && pattern.matches('*').count() == 1 => {
+			model.starts_with(&pattern[..pattern.len() - 1])
+		},
+		_ if !pattern.contains('*') => pattern == model,
+		_ => false,
 	}
 }
 

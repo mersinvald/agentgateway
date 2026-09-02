@@ -8594,6 +8594,18 @@
         {
           "type": "object",
           "properties": {
+            "codexSubscription": {
+              "$ref": "#/$defs/Provider2"
+            }
+          },
+          "required": [
+            "codexSubscription"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
             "custom": {
               "$ref": "#/$defs/CustomProvider"
             }
@@ -8856,6 +8868,61 @@
         }
       },
       "additionalProperties": false
+    },
+    "Provider2": {
+      "type": "object",
+      "properties": {
+        "refreshInterval": {
+          "$ref": "#/$defs/Duration",
+          "default": {
+            "secs": 300,
+            "nanos": 0
+          }
+        },
+        "staleWhileRevalidate": {
+          "$ref": "#/$defs/Duration",
+          "default": {
+            "secs": 3600,
+            "nanos": 0
+          }
+        },
+        "allowModels": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [
+            "*"
+          ]
+        },
+        "denyModels": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": []
+        }
+      },
+      "additionalProperties": false
+    },
+    "Duration": {
+      "type": "object",
+      "properties": {
+        "secs": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "nanos": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "secs",
+        "nanos"
+      ]
     },
     "CustomProvider": {
       "type": "object",

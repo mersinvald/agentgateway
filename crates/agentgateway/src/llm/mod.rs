@@ -10,8 +10,8 @@ pub use agent_llm::tokenizer::{num_tokens_from_messages, preload_tokenizers};
 pub use agent_llm::{
 	AIError, CacheTokenConvention, ChatFormat, ContentScope, InputFormat, LLMInfo, LLMRequest,
 	LLMRequestParams, LLMResponse, LogContentFields, PromptCachingConfig, Provider, ProviderState,
-	RequestType, ResponseType, RouteType, SimpleChatCompletionMessage, anthropic, conversion,
-	copilot, custom, gemini, logged_response_parsing, openai, types,
+	RequestType, ResponseType, RouteType, SimpleChatCompletionMessage, anthropic, codex_subscription,
+	conversion, copilot, custom, gemini, logged_response_parsing, openai, types,
 };
 use axum_extra::headers::authorization::Bearer;
 use headers::{ContentEncoding, HeaderMapExt};
@@ -34,6 +34,8 @@ pub mod model_router;
 pub use agent_llm::{azure, bedrock, vertex};
 
 pub mod catalog;
+pub mod codex_catalog;
+pub mod codex_oauth;
 pub mod policy;
 
 use policy::streaming_guardrails::GuardedSseBody;
@@ -129,6 +131,7 @@ pub enum AIProvider {
 	Bedrock(BedrockProvider),
 	Azure(AzureProvider),
 	Copilot(copilot::Provider),
+	CodexSubscription(agent_llm::codex_subscription::Provider),
 	Custom(custom::Provider),
 }
 
@@ -866,6 +869,7 @@ impl AIProvider {
 	pub fn provider(&self) -> Strng {
 		match self {
 			AIProvider::OpenAI(_p) => openai::Provider::NAME,
+			AIProvider::CodexSubscription(_p) => agent_llm::codex_subscription::Provider::NAME,
 			AIProvider::Anthropic(_p) => anthropic::Provider::NAME,
 			AIProvider::Gemini(_p) => gemini::Provider::NAME,
 			AIProvider::Vertex(_p) => vertex::Provider::NAME,
@@ -881,6 +885,7 @@ impl AIProvider {
 	fn default_base_path(&self) -> Option<&'static str> {
 		match self {
 			AIProvider::OpenAI(_) | AIProvider::Copilot(_) => Some(openai::DEFAULT_BASE_PATH),
+			AIProvider::CodexSubscription(_) => Some(agent_llm::codex_subscription::DEFAULT_BASE_PATH),
 			AIProvider::Anthropic(_) => Some(anthropic::DEFAULT_BASE_PATH),
 			_ => None,
 		}
@@ -889,6 +894,7 @@ impl AIProvider {
 	pub fn override_model(&self) -> Option<Strng> {
 		match self {
 			AIProvider::OpenAI(p) => p.model.clone(),
+			AIProvider::CodexSubscription(_) => None,
 			AIProvider::Anthropic(p) => p.model.clone(),
 			AIProvider::Gemini(p) => p.model.clone(),
 			AIProvider::Vertex(p) => p.model.clone(),
@@ -903,6 +909,7 @@ impl AIProvider {
 		use custom::ProviderFormat::*;
 		match self {
 			AIProvider::OpenAI(_) => vec![Completions, Responses, Embeddings, Realtime, Rerank],
+			AIProvider::CodexSubscription(_) => vec![Completions, Responses],
 			AIProvider::Copilot(_) => {
 				if copilot::Provider::is_anthropic_model(request_model) {
 					vec![Messages]
@@ -951,6 +958,9 @@ impl AIProvider {
 	) -> Vec<ChatFormat> {
 		match self {
 			AIProvider::OpenAI(_) => {
+				vec![ChatFormat::OpenAIResponses, ChatFormat::OpenAICompletions]
+			},
+			AIProvider::CodexSubscription(_) => {
 				vec![ChatFormat::OpenAIResponses, ChatFormat::OpenAICompletions]
 			},
 
@@ -1075,7 +1085,10 @@ impl AIProvider {
 			..Default::default()
 		};
 		Some(match self {
-			AIProvider::OpenAI(_) | AIProvider::Gemini(_) | AIProvider::Anthropic(_) => btls,
+			AIProvider::OpenAI(_)
+			| AIProvider::CodexSubscription(_)
+			| AIProvider::Gemini(_)
+			| AIProvider::Anthropic(_) => btls,
 			AIProvider::Copilot(_) => BackendPolicies {
 				backend_auth: Some(BackendAuth::new(BackendAuthKind::Copilot)),
 				..btls
@@ -1113,6 +1126,9 @@ impl AIProvider {
 	pub fn default_connector_target(&self, route_type: RouteType) -> Option<Target> {
 		Some(match self {
 			AIProvider::OpenAI(_) => Target::Hostname(openai::DEFAULT_HOST, 443),
+			AIProvider::CodexSubscription(_) => {
+				Target::Hostname(agent_llm::codex_subscription::DEFAULT_HOST, 443)
+			},
 			AIProvider::Copilot(_) => Target::Hostname(copilot::DEFAULT_HOST, 443),
 			AIProvider::Gemini(_) => Target::Hostname(gemini::DEFAULT_HOST, 443),
 			AIProvider::Anthropic(_) => Target::Hostname(anthropic::DEFAULT_HOST, 443),
@@ -1232,6 +1248,20 @@ impl AIProvider {
 					let path = format!(
 						"{}{}",
 						path_prefix.map_or(openai::DEFAULT_BASE_PATH, |prefix| {
+							prefix.trim_end_matches('/')
+						}),
+						openai::path_suffix(route_type)
+					);
+					Self::set_path_and_query(uri, &path)?;
+					Ok(())
+				})?;
+				Ok(())
+			}),
+			AIProvider::CodexSubscription(_) => http::modify_req(req, |req| {
+				http::modify_uri(req, |uri| {
+					let path = format!(
+						"{}{}",
+						path_prefix.map_or(agent_llm::codex_subscription::DEFAULT_BASE_PATH, |prefix| {
 							prefix.trim_end_matches('/')
 						}),
 						openai::path_suffix(route_type)
@@ -1383,6 +1413,9 @@ impl AIProvider {
 	) -> anyhow::Result<()> {
 		let authority = match self {
 			AIProvider::OpenAI(_) => Authority::from_static(openai::DEFAULT_HOST_STR),
+			AIProvider::CodexSubscription(_) => {
+				Authority::from_static(agent_llm::codex_subscription::DEFAULT_HOST_STR)
+			},
 			AIProvider::Copilot(_) => Authority::from_static(copilot::DEFAULT_HOST_STR),
 			AIProvider::Anthropic(_) => Authority::from_static(anthropic::DEFAULT_HOST_STR),
 			AIProvider::Gemini(_) => Authority::from_static(gemini::DEFAULT_HOST_STR),
@@ -1552,7 +1585,10 @@ impl AIProvider {
 		}
 		if matches!(
 			self,
-			AIProvider::OpenAI(_) | AIProvider::Copilot(_) | AIProvider::Azure(_)
+			AIProvider::OpenAI(_)
+				| AIProvider::CodexSubscription(_)
+				| AIProvider::Copilot(_)
+				| AIProvider::Azure(_)
 		) {
 			req.normalize_openai_token_limit();
 		}
@@ -1924,6 +1960,7 @@ impl AIProvider {
 		match self {
 			AIProvider::Custom(_)
 			| AIProvider::OpenAI(_)
+			| AIProvider::CodexSubscription(_)
 			| AIProvider::Copilot(_)
 			| AIProvider::Azure(_)
 			| AIProvider::Gemini(_)
@@ -1937,6 +1974,7 @@ impl AIProvider {
 		match self {
 			AIProvider::Custom(_)
 			| AIProvider::OpenAI(_)
+			| AIProvider::CodexSubscription(_)
 			| AIProvider::Copilot(_)
 			| AIProvider::Azure(_)
 			| AIProvider::Gemini(_)

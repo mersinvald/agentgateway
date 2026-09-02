@@ -60,6 +60,9 @@ mod agentgateway_internal {
 
 pub mod agentgateway {
 	pub mod dev {
+		pub mod credential {
+			tonic::include_proto!("agentgateway.dev.credential");
+		}
 		pub mod resource {
 			pub use crate::agentgateway_internal::dev::resource::*;
 		}

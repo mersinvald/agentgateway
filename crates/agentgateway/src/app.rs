@@ -106,6 +106,44 @@ pub async fn run(
 		config.model_catalog.sources.clone()
 	};
 	let model_catalog = crate::llm::catalog::ModelCatalog::new(model_catalog_sources).await?;
+	let codex_oauth = if let Some(address) = &config.xds.address {
+		let headers = config
+			.xds
+			.headers
+			.iter()
+			.map(|(name, value)| Ok((name.parse()?, value.parse()?)))
+			.collect::<anyhow::Result<Vec<_>>>()?;
+		let channel = crate::control::grpc_connector(
+			control_client.clone(),
+			address.clone(),
+			config.xds.auth.clone(),
+			config.xds.ca_cert.clone(),
+			headers,
+		)
+		.await?;
+		Arc::new(crate::llm::codex_oauth::Manager::new(
+			Arc::new(crate::llm::codex_oauth::HttpTokenEndpoint::new()),
+			Arc::new(crate::llm::codex_oauth::ControlPlaneCredentialStore::new(
+				channel,
+			)),
+		))
+	} else {
+		match (config_resource_store.as_ref(), &config.session_encoder) {
+			(Some(store), crate::http::sessionpersistence::Encoder::Aes(_)) => {
+				Arc::new(crate::llm::codex_oauth::Manager::new(
+					Arc::new(crate::llm::codex_oauth::HttpTokenEndpoint::new()),
+					Arc::new(
+						crate::llm::codex_oauth::DatabaseCredentialStore::new(
+							store.pool(),
+							config.session_encoder.clone(),
+						)
+						.await?,
+					),
+				))
+			},
+			_ => Arc::new(crate::llm::codex_oauth::Manager::unavailable()),
+		}
+	};
 
 	let (xds_tx, xds_rx) = tokio::sync::watch::channel(());
 	let state_mgr = state_manager::StateManager::new(
@@ -152,6 +190,8 @@ pub async fn run(
 		stores: stores.clone(),
 		metrics: metrics_handle.clone(),
 		model_catalog,
+		codex_catalog: Arc::new(crate::llm::codex_catalog::Cache::default()),
+		codex_oauth,
 		admin: Some(admin_server.service()),
 		upstream: client.clone(),
 		ca,

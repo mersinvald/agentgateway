@@ -1,4 +1,4 @@
-use agentgateway::llm::{AIProvider, custom, gemini, openai};
+use agentgateway::llm::{AIProvider, codex_subscription, custom, gemini, openai};
 use agentgateway::test_helpers::ratelimitmock;
 use agentgateway::types::agent::TrafficPolicy;
 use tokio::sync::mpsc;
@@ -372,6 +372,400 @@ llm:
 	let body: Value = serde_json::from_slice(&read_body_raw(response.into_body()).await).unwrap();
 	assert_eq!(body["error"]["code"], "model_not_allowed");
 	assert_eq!(mock.received_requests().await.unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn llm_codex_subscription_models_uses_catalog_cache() {
+	let mock = MockServer::start().await;
+	Mock::given(wiremock::matchers::method("GET"))
+		.and(wiremock::matchers::path("/backend-api/codex/models"))
+		.respond_with(
+			ResponseTemplate::new(StatusCode::OK.as_u16()).set_body_json(json!({
+				"models": [
+					{"slug": "hidden", "visibility": "hidden", "supported_in_api": true},
+					{"slug": "gpt-codex", "visibility": "list", "supported_in_api": true, "priority": 1}
+				]
+			})),
+		)
+		.mount(&mock)
+		.await;
+	let mut provider = llm_named_provider(
+		&mock,
+		AIProvider::CodexSubscription(codex_subscription::Provider {
+			refresh_interval: Duration::from_secs(60),
+			stale_while_revalidate: Duration::from_secs(60),
+			allow_models: vec!["*".into()],
+			deny_models: vec![],
+		}),
+		false,
+	);
+	provider.policies = Some(
+		serde_json::from_value(json!({
+			"ai": {"routes": {"/v1/models": "models"}},
+			"backendAuth": {
+				"key": {"value": "catalog-token"},
+				"credentials": [{
+					"location": {"header": {"name": "chatgpt-account-id"}},
+					"key": "account-id"
+				}]
+			}
+		}))
+		.expect("models route policy"),
+	);
+	let (mock, _bind, io) = setup_llm_named_provider_mock(mock, provider, "{}");
+
+	for _ in 0..2 {
+		let response = send_request(io.clone(), Method::GET, "http://lo/v1/models").await;
+		assert_eq!(response.status(), StatusCode::OK);
+		assert_eq!(
+			response.headers()[header::CACHE_CONTROL],
+			"private, no-cache"
+		);
+		let body: Value = serde_json::from_slice(&read_body_raw(response.into_body()).await).unwrap();
+		assert_eq!(body["object"], "list");
+		assert_eq!(body["data"][0]["id"], "gpt-codex");
+		assert_eq!(body["data"][0]["object"], "model");
+		assert_eq!(body["data"].as_array().unwrap().len(), 1);
+	}
+
+	let request = single_upstream_request(&mock).await;
+	assert_eq!(
+		&request.url[Position::BeforePath..Position::AfterQuery],
+		format!(
+			"/backend-api/codex/models?client_version={}",
+			env!("CARGO_PKG_VERSION")
+		),
+	);
+	assert_eq!(request.headers["accept"], "application/json");
+	assert_eq!(
+		request.headers["authorization"],
+		"Bearer test-codex-access-token"
+	);
+	assert_eq!(
+		request.headers["chatgpt-account-id"],
+		"test-codex-account-id"
+	);
+	assert_eq!(
+		request.headers["x-openai-internal-codex-residency"],
+		"test-codex-residency"
+	);
+}
+
+#[tokio::test]
+async fn llm_codex_subscription_models_revalidates_with_etag() {
+	let mock = MockServer::start().await;
+	Mock::given(wiremock::matchers::method("GET"))
+		.respond_with(
+			ResponseTemplate::new(StatusCode::OK.as_u16())
+				.insert_header("etag", "\"catalog-v1\"")
+				.set_body_json(json!({
+					"models": [{"slug": "gpt-codex", "visibility": "list", "supported_in_api": true}]
+				})),
+		)
+		.mount(&mock)
+		.await;
+	let mut provider = llm_named_provider(
+		&mock,
+		AIProvider::CodexSubscription(codex_subscription::Provider {
+			refresh_interval: Duration::ZERO,
+			stale_while_revalidate: Duration::from_secs(60),
+			allow_models: vec!["*".into()],
+			deny_models: vec![],
+		}),
+		false,
+	);
+	provider.policies = Some(
+		serde_json::from_value(json!({"ai": {"routes": {"/v1/models": "models"}}}))
+			.expect("models route policy"),
+	);
+	let (mock, _bind, io) = setup_llm_named_provider_mock(mock, provider, "{}");
+
+	let response = send_request(io.clone(), Method::GET, "http://lo/v1/models").await;
+	assert_eq!(response.status(), StatusCode::OK);
+	let _ = read_body_raw(response.into_body()).await;
+
+	mock.reset().await;
+	Mock::given(wiremock::matchers::method("GET"))
+		.and(wiremock::matchers::header(
+			"if-none-match",
+			"\"catalog-v1\"",
+		))
+		.respond_with(ResponseTemplate::new(StatusCode::NOT_MODIFIED.as_u16()))
+		.mount(&mock)
+		.await;
+	let response = send_request(io, Method::GET, "http://lo/v1/models").await;
+	assert_eq!(response.status(), StatusCode::OK);
+	let body: Value = serde_json::from_slice(&read_body_raw(response.into_body()).await).unwrap();
+	assert_eq!(body["data"][0]["id"], "gpt-codex");
+	assert_eq!(mock.received_requests().await.unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn llm_codex_subscription_admits_catalog_models_before_inference() {
+	let mock = MockServer::start().await;
+	Mock::given(wiremock::matchers::method("GET"))
+		.and(wiremock::matchers::path("/backend-api/codex/models"))
+		.respond_with(
+			ResponseTemplate::new(StatusCode::OK.as_u16()).set_body_json(json!({
+				"models": [
+					{"slug": "gpt-codex-hidden", "visibility": "hidden", "supported_in_api": true},
+					{"slug": "gpt-codex-2026-08-25", "visibility": "list", "supported_in_api": true},
+					{"slug": "gpt-codex-blocked", "visibility": "list", "supported_in_api": true}
+				]
+			})),
+		)
+		.mount(&mock)
+		.await;
+	Mock::given(wiremock::matchers::method("POST"))
+		.respond_with(ResponseTemplate::new(StatusCode::OK.as_u16()).set_body_raw(
+			llm_body!("response/completions/basic.json"),
+			"application/json",
+		))
+		.mount(&mock)
+		.await;
+	let provider = llm_named_provider(
+		&mock,
+		AIProvider::CodexSubscription(codex_subscription::Provider {
+			refresh_interval: Duration::from_secs(60),
+			stale_while_revalidate: Duration::from_secs(60),
+			allow_models: vec!["gpt-codex-*".into()],
+			deny_models: vec!["gpt-codex-blocked".into()],
+		}),
+		false,
+	);
+	let (mock, _bind, io) = setup_llm_named_provider_mock(mock, provider, "{}");
+
+	let response = send_completions_with_model(io.clone(), "gpt-codex-hidden", &[]).await;
+	assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+	let body: Value = serde_json::from_slice(&read_body_raw(response.into_body()).await).unwrap();
+	assert_eq!(body["error"]["type"], "invalid_request_error");
+	assert_eq!(body["error"]["code"], "model_not_found");
+
+	let response = send_completions_with_model(io.clone(), "gpt-codex-blocked", &[]).await;
+	assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+	let body: Value = serde_json::from_slice(&read_body_raw(response.into_body()).await).unwrap();
+	assert_eq!(body["error"]["type"], "invalid_request_error");
+	assert_eq!(body["error"]["code"], "model_not_allowed");
+
+	let response = send_completions_with_model(io, "gpt-codex-2026-08-25", &[]).await;
+	assert_eq!(response.status(), StatusCode::OK);
+	let _ = read_body_raw(response.into_body()).await;
+
+	let requests = mock.received_requests().await.unwrap();
+	assert_eq!(requests.len(), 2);
+	let inference = requests
+		.iter()
+		.find(|request| request.method == Method::POST)
+		.expect("only the admitted request reaches inference");
+	let body: Value = serde_json::from_slice(&inference.body).unwrap();
+	assert_eq!(body["model"], "gpt-codex-2026-08-25");
+}
+
+#[tokio::test]
+async fn llm_codex_subscription_direct_backend_handles_control_model_before_catalog_admission() {
+	let mock = MockServer::start().await;
+	let provider = llm_named_provider(
+		&mock,
+		AIProvider::CodexSubscription(codex_subscription::Provider {
+			refresh_interval: Duration::from_secs(60),
+			stale_while_revalidate: Duration::from_secs(60),
+			allow_models: vec!["*".into()],
+			deny_models: vec![],
+		}),
+		false,
+	);
+	let (mock, _bind, io) = setup_llm_named_provider_mock(mock, provider, "{}");
+
+	let response = send_completions_with_model(io, "codex-subscription-auth", &[]).await;
+	assert_eq!(response.status(), StatusCode::OK);
+	let body: Value = serde_json::from_slice(&read_body_raw(response.into_body()).await).unwrap();
+	assert_eq!(body["object"], "chat.completion");
+	assert_eq!(body["model"], "codex-subscription-auth");
+	let instruction: Value = serde_json::from_str(
+		body["choices"][0]["message"]["content"]
+			.as_str()
+			.expect("control response content"),
+	)
+	.expect("control response instruction");
+	assert_eq!(instruction["status"], "authorized");
+	assert!(mock.received_requests().await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn llm_codex_subscription_direct_backend_rejects_streaming_control_model() {
+	let mock = MockServer::start().await;
+	let provider = llm_named_provider(
+		&mock,
+		AIProvider::CodexSubscription(codex_subscription::Provider {
+			refresh_interval: Duration::from_secs(60),
+			stale_while_revalidate: Duration::from_secs(60),
+			allow_models: vec!["*".into()],
+			deny_models: vec![],
+		}),
+		false,
+	);
+	let (mock, _bind, io) = setup_llm_named_provider_mock(mock, provider, "{}");
+	let body = json!({
+		"model": "codex-subscription-auth",
+		"messages": [],
+		"stream": true,
+	});
+
+	let response = RequestBuilder::new(Method::POST, "http://lo/v1/chat/completions")
+		.body(Body::from(serde_json::to_vec(&body).unwrap()))
+		.send(io)
+		.await
+		.expect("streaming control request");
+	assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+	let body: Value = serde_json::from_slice(&read_body_raw(response.into_body()).await).unwrap();
+	assert_eq!(
+		body["error"]["code"],
+		"codex_subscription_auth_streaming_unsupported"
+	);
+	assert!(mock.received_requests().await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn llm_codex_subscription_refreshes_model_unavailable_once() {
+	let mock = MockServer::start().await;
+	let catalog_requests = Arc::new(AtomicUsize::new(0));
+	let inference_requests = Arc::new(AtomicUsize::new(0));
+	Mock::given(wiremock::matchers::any())
+		.respond_with({
+			let catalog_requests = catalog_requests.clone();
+			let inference_requests = inference_requests.clone();
+			move |request: &wiremock::Request| {
+				if request.method == Method::GET {
+					catalog_requests.fetch_add(1, Ordering::SeqCst);
+					ResponseTemplate::new(StatusCode::OK.as_u16()).set_body_json(json!({
+						"models": [{"slug": "gpt-codex", "visibility": "list", "supported_in_api": true}]
+					}))
+				} else {
+					let attempt = inference_requests.fetch_add(1, Ordering::SeqCst);
+					if attempt == 0 {
+						ResponseTemplate::new(StatusCode::NOT_FOUND.as_u16()).set_body_json(json!({
+							"error": {"code": "model_not_found", "message": "retired"}
+						}))
+					} else {
+						ResponseTemplate::new(StatusCode::OK.as_u16()).set_body_raw(
+							llm_body!("response/completions/basic.json"),
+							"application/json",
+						)
+					}
+				}
+			}
+		})
+		.mount(&mock)
+		.await;
+	let provider = llm_named_provider(
+		&mock,
+		AIProvider::CodexSubscription(codex_subscription::Provider {
+			refresh_interval: Duration::from_secs(60),
+			stale_while_revalidate: Duration::from_secs(60),
+			allow_models: vec!["*".into()],
+			deny_models: vec![],
+		}),
+		false,
+	);
+	let (_mock, _bind, io) = setup_llm_named_provider_mock(mock, provider, "{}");
+
+	let response = send_completions_with_model(io, "gpt-codex", &[]).await;
+	assert_eq!(response.status(), StatusCode::OK);
+	let _ = read_body_raw(response.into_body()).await;
+	assert_eq!(catalog_requests.load(Ordering::SeqCst), 2);
+	assert_eq!(inference_requests.load(Ordering::SeqCst), 2);
+}
+
+#[tokio::test]
+async fn llm_codex_subscription_does_not_refresh_for_message_only_match() {
+	let mock = MockServer::start().await;
+	let catalog_requests = Arc::new(AtomicUsize::new(0));
+	let inference_requests = Arc::new(AtomicUsize::new(0));
+	Mock::given(wiremock::matchers::any())
+		.respond_with({
+			let catalog_requests = catalog_requests.clone();
+			let inference_requests = inference_requests.clone();
+			move |request: &wiremock::Request| {
+				if request.method == Method::GET {
+					catalog_requests.fetch_add(1, Ordering::SeqCst);
+					ResponseTemplate::new(StatusCode::OK.as_u16()).set_body_json(json!({
+						"models": [{"slug": "gpt-codex", "visibility": "list", "supported_in_api": true}]
+					}))
+				} else {
+					inference_requests.fetch_add(1, Ordering::SeqCst);
+					ResponseTemplate::new(StatusCode::NOT_FOUND.as_u16())
+						.insert_header("x-original", "yes")
+						.set_body_json(json!({"error": {"code": "other", "message": "model_not_found"}}))
+				}
+			}
+		})
+		.mount(&mock)
+		.await;
+	let provider = llm_named_provider(
+		&mock,
+		AIProvider::CodexSubscription(codex_subscription::Provider {
+			refresh_interval: Duration::from_secs(60),
+			stale_while_revalidate: Duration::from_secs(60),
+			allow_models: vec!["*".into()],
+			deny_models: vec![],
+		}),
+		false,
+	);
+	let (_mock, _bind, io) = setup_llm_named_provider_mock(mock, provider, "{}");
+
+	let response = send_completions_with_model(io, "gpt-codex", &[]).await;
+	assert_eq!(response.status(), StatusCode::NOT_FOUND);
+	assert_eq!(response.headers()["x-original"], "yes");
+	let body: Value = serde_json::from_slice(&read_body_raw(response.into_body()).await).unwrap();
+	assert_eq!(body["error"]["code"], "other");
+	assert_eq!(catalog_requests.load(Ordering::SeqCst), 1);
+	assert_eq!(inference_requests.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn llm_codex_subscription_preserves_unavailable_response_when_refresh_removes_model() {
+	let mock = MockServer::start().await;
+	let catalog_requests = Arc::new(AtomicUsize::new(0));
+	let inference_requests = Arc::new(AtomicUsize::new(0));
+	Mock::given(wiremock::matchers::any())
+		.respond_with({
+			let catalog_requests = catalog_requests.clone();
+			let inference_requests = inference_requests.clone();
+			move |request: &wiremock::Request| {
+				if request.method == Method::GET {
+					let refresh = catalog_requests.fetch_add(1, Ordering::SeqCst) > 0;
+					ResponseTemplate::new(StatusCode::OK.as_u16()).set_body_json(json!({
+						"models": if refresh { vec![] } else { vec![json!({"slug": "gpt-codex", "visibility": "list", "supported_in_api": true})] }
+					}))
+				} else {
+					inference_requests.fetch_add(1, Ordering::SeqCst);
+					ResponseTemplate::new(StatusCode::NOT_FOUND.as_u16())
+						.insert_header("x-original", "yes")
+						.set_body_json(json!({"error": {"code": "model_not_found", "message": "retired"}}))
+				}
+			}
+		})
+		.mount(&mock)
+		.await;
+	let provider = llm_named_provider(
+		&mock,
+		AIProvider::CodexSubscription(codex_subscription::Provider {
+			refresh_interval: Duration::from_secs(60),
+			stale_while_revalidate: Duration::from_secs(60),
+			allow_models: vec!["*".into()],
+			deny_models: vec![],
+		}),
+		false,
+	);
+	let (_mock, _bind, io) = setup_llm_named_provider_mock(mock, provider, "{}");
+
+	let response = send_completions_with_model(io, "gpt-codex", &[]).await;
+	assert_eq!(response.status(), StatusCode::NOT_FOUND);
+	assert_eq!(response.headers()["x-original"], "yes");
+	let body: Value = serde_json::from_slice(&read_body_raw(response.into_body()).await).unwrap();
+	assert_eq!(body["error"]["code"], "model_not_found");
+	assert_eq!(catalog_requests.load(Ordering::SeqCst), 2);
+	assert_eq!(inference_requests.load(Ordering::SeqCst), 1);
 }
 
 #[tokio::test]
