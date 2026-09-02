@@ -19,7 +19,8 @@ env:
 jobs:
   build-and-push:
     name: Build and push ARM64 images
-    runs-on: ubuntu-24.04-arm
+    # ARC runner scale sets dispatch by this exact scale-set name.
+    runs-on: agentgateway
     timeout-minutes: 180
     steps:
       - name: Checkout
@@ -33,6 +34,11 @@ jobs:
           registry: ${{ env.HARBOR_REGISTRY }}
           username: ${{ secrets.HARBOR_CI_USERNAME }}
           password: ${{ secrets.HARBOR_CI_TOKEN }}
+
+      # The deployed ARC worker pool is amd64; enable emulation before
+      # building the workflow's linux/arm64 image targets.
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130 # v3.6.0
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
