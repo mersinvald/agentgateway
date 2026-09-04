@@ -3454,6 +3454,14 @@ async fn fetch_codex_catalog(
 	request
 		.headers_mut()
 		.insert(header::ACCEPT, HeaderValue::from_static("application/json"));
+	let user_agent = HeaderValue::from_str(&format!(
+		"agentgateway/{}",
+		agent_core::version::BuildInfo::new().version
+	))
+	.map_err(|_| {
+		ProxyError::ProcessingString("Agentgateway build version is not a valid User-Agent".into())
+	})?;
+	request.headers_mut().insert(header::USER_AGENT, user_agent);
 	if let Some(etag) = etag
 		&& let Ok(etag) = HeaderValue::from_str(etag)
 	{
