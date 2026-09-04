@@ -437,11 +437,7 @@ async fn llm_codex_subscription_models_uses_catalog_cache() {
 		),
 	);
 	assert_eq!(request.headers["accept"], "application/json");
-	assert_eq!(request.headers["originator"], "codex_cli_rs");
-	assert_eq!(
-		request.headers["user-agent"],
-		format!("codex_cli_rs/{}", env!("CARGO_PKG_VERSION"))
-	);
+	assert!(request.headers.get("originator").is_none());
 	assert_eq!(
 		request.headers["authorization"],
 		"Bearer test-codex-access-token"

@@ -2262,12 +2262,30 @@ async fn make_backend_call(
 			model_router::ResolveResult::ModelList(list) => {
 				return Box::pin(async move {
 					let selected_backend = resolve_backend(list.dynamic_backend.backend, inputs.as_ref())?;
-					let concrete_policies = get_backend_policies(inputs.as_ref(), &selected_backend.backend, &selected_backend.inline_policies, route_path.clone());
-					let route_policies = route_policies.merge_backend_policies(Some(list.dynamic_backend.llm_policy));
+					let concrete_policies = get_backend_policies(
+						inputs.as_ref(),
+						&selected_backend.backend,
+						&selected_backend.inline_policies,
+						route_path.clone(),
+					);
+					let route_policies =
+						route_policies.merge_backend_policies(Some(list.dynamic_backend.llm_policy));
 					let policies = Arc::new(base_policies.as_ref().clone().merge(concrete_policies));
-					let response = Box::pin(make_backend_call(inputs, route_policies, &selected_backend.backend.backend, policies, route_path, req, log, response_policies, allow_codex_model_refresh)).await?;
+					let response = Box::pin(make_backend_call(
+						inputs,
+						route_policies,
+						&selected_backend.backend.backend,
+						policies,
+						route_path,
+						req,
+						log,
+						response_policies,
+						allow_codex_model_refresh,
+					))
+					.await?;
 					Ok(merge_model_lists(list.static_models, response).await)
-				}).await;
+				})
+				.await;
 			},
 			model_router::ResolveResult::Backend(resolved) => resolved,
 		};
@@ -3121,10 +3139,11 @@ async fn make_backend_call(
 }
 
 const CODEX_CATALOG_MAX_BYTES: usize = 1024 * 1024;
-const CODEX_CATALOG_ORIGINATOR: &str = "codex_cli_rs";
-const CODEX_CATALOG_USER_AGENT: &str = concat!("codex_cli_rs/", env!("CARGO_PKG_VERSION"));
 
-async fn merge_model_lists(mut static_models: Vec<serde_json::Value>, response: Response) -> Response {
+async fn merge_model_lists(
+	mut static_models: Vec<serde_json::Value>,
+	response: Response,
+) -> Response {
 	let (parts, body) = response.into_parts();
 	if !parts.status.is_success() {
 		// The dynamic entry is an authenticated Codex catalog. Never expose an
@@ -3137,7 +3156,10 @@ async fn merge_model_lists(mut static_models: Vec<serde_json::Value>, response: 
 	let Ok(mut dynamic) = serde_json::from_slice::<serde_json::Value>(&body) else {
 		return codex_catalog_unavailable();
 	};
-	let Some(entries) = dynamic.get_mut("data").and_then(serde_json::Value::as_array_mut) else {
+	let Some(entries) = dynamic
+		.get_mut("data")
+		.and_then(serde_json::Value::as_array_mut)
+	else {
 		return codex_catalog_unavailable();
 	};
 	let mut ids = static_models
@@ -3145,11 +3167,17 @@ async fn merge_model_lists(mut static_models: Vec<serde_json::Value>, response: 
 		.filter_map(|entry| entry.get("id").and_then(serde_json::Value::as_str))
 		.map(str::to_owned)
 		.collect::<std::collections::HashSet<_>>();
-	static_models.extend(entries.iter().filter(|entry| {
-		entry.get("id")
-			.and_then(serde_json::Value::as_str)
-			.is_some_and(|id| ids.insert(id.to_owned()))
-	}).cloned());
+	static_models.extend(
+		entries
+			.iter()
+			.filter(|entry| {
+				entry
+					.get("id")
+					.and_then(serde_json::Value::as_str)
+					.is_some_and(|id| ids.insert(id.to_owned()))
+			})
+			.cloned(),
+	);
 	dynamic["data"] = serde_json::Value::Array(static_models);
 	::http::Response::from_parts(parts, http::Body::from(dynamic.to_string()))
 }
@@ -3426,16 +3454,6 @@ async fn fetch_codex_catalog(
 	request
 		.headers_mut()
 		.insert(header::ACCEPT, HeaderValue::from_static("application/json"));
-	// The catalog endpoint is owned by the native Codex API surface. Its edge
-	// requires an explicit Codex client identity rather than the transport default.
-	request.headers_mut().insert(
-		HeaderName::from_static("originator"),
-		HeaderValue::from_static(CODEX_CATALOG_ORIGINATOR),
-	);
-	request.headers_mut().insert(
-		header::USER_AGENT,
-		HeaderValue::from_static(CODEX_CATALOG_USER_AGENT),
-	);
 	if let Some(etag) = etag
 		&& let Ok(etag) = HeaderValue::from_str(etag)
 	{
@@ -3470,11 +3488,8 @@ async fn fetch_codex_catalog(
 				.split(';')
 				.next()
 				.is_some_and(|media_type| media_type.trim().eq_ignore_ascii_case("application/json"))
-		})
-	{
-		return Err(
-			ProxyError::ProcessingString("Codex catalog response was not JSON".into()).into(),
-		);
+		}) {
+		return Err(ProxyError::ProcessingString("Codex catalog response was not JSON".into()).into());
 	}
 	let etag = response
 		.headers()
@@ -4174,7 +4189,10 @@ mod tests {
 
 		let response = merge_model_lists(vec![], response).await;
 		assert_eq!(response.status(), ::http::StatusCode::SERVICE_UNAVAILABLE);
-		assert_eq!(response.headers()[::http::header::CONTENT_TYPE], "application/json");
+		assert_eq!(
+			response.headers()[::http::header::CONTENT_TYPE],
+			"application/json"
+		);
 		let body: serde_json::Value =
 			serde_json::from_slice(&proxymock::read_body_raw(response.into_body()).await)
 				.expect("sanitized catalog failure is JSON");

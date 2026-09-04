@@ -377,11 +377,13 @@ impl ModelRouter {
 
 	fn dynamic_model_backend(&self, req: &Request) -> Option<ResolvedBackend> {
 		self.models.iter().find_map(|model| {
-			(model.name == "*" && model.visibility == ModelVisibility::Public && model_authorized(model, req))
-				.then(|| ResolvedBackend {
-					backend: model.backend.clone(),
-					llm_policy: model.policies.llm.clone(),
-				})
+			(model.name == "*"
+				&& model.visibility == ModelVisibility::Public
+				&& model_authorized(model, req))
+			.then(|| ResolvedBackend {
+				backend: model.backend.clone(),
+				llm_policy: model.policies.llm.clone(),
+			})
 		})
 	}
 
