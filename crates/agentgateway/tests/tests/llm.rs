@@ -399,6 +399,7 @@ async fn llm_codex_subscription_models_uses_catalog_cache() {
 		}),
 		false,
 	);
+	provider.path_prefix = Some(codex_subscription::DEFAULT_BASE_PATH.into());
 	provider.policies = Some(
 		serde_json::from_value(json!({
 			"ai": {"routes": {"/v1/models": "models"}},

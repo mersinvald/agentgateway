@@ -3438,15 +3438,24 @@ async fn fetch_codex_catalog(
 	_source_headers: &HeaderMap,
 	etag: Option<&str>,
 ) -> Result<CodexCatalogFetch, ProxyResponse> {
-	if !has_host_override && path_prefix.is_none() {
+	if !has_host_override
+		&& path_prefix.is_none_or(|prefix| {
+			prefix.trim_end_matches('/') == agent_llm::codex_subscription::DEFAULT_BASE_PATH
+		}) {
 		return fetch_default_codex_catalog(inputs, etag).await;
 	}
-	let path = format!(
-		"{}{}?client_version={}",
-		path_prefix.unwrap_or("").trim_end_matches('/'),
-		agent_llm::codex_subscription::MODELS_PATH,
-		CODEX_CATALOG_CLIENT_VERSION,
-	);
+	let path = match path_prefix {
+		Some(prefix) => format!(
+			"{}/models?client_version={}",
+			prefix.trim_end_matches('/'),
+			CODEX_CATALOG_CLIENT_VERSION,
+		),
+		None => format!(
+			"{}?client_version={}",
+			agent_llm::codex_subscription::MODELS_PATH,
+			CODEX_CATALOG_CLIENT_VERSION,
+		),
+	};
 	let authority = if has_host_override {
 		source_authority.unwrap_or_else(|| Authority::from_static("catalog.invalid"))
 	} else {
