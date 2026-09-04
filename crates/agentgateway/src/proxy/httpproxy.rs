@@ -3438,6 +3438,9 @@ async fn fetch_codex_catalog(
 	_source_headers: &HeaderMap,
 	etag: Option<&str>,
 ) -> Result<CodexCatalogFetch, ProxyResponse> {
+	if !has_host_override && path_prefix.is_none() {
+		return fetch_default_codex_catalog(inputs, etag).await;
+	}
 	let path = format!(
 		"{}{}?client_version={}",
 		path_prefix.unwrap_or("").trim_end_matches('/'),
@@ -3518,6 +3521,93 @@ async fn fetch_codex_catalog(
 	let catalog = llm::codex_catalog::Catalog::parse(&body)
 		.map_err(|_| ProxyError::ProcessingString("Codex catalog response was invalid".into()))?;
 	Ok(CodexCatalogFetch::Updated { catalog, etag })
+}
+
+async fn fetch_default_codex_catalog(
+	inputs: &ProxyInputs,
+	etag: Option<&str>,
+) -> Result<CodexCatalogFetch, ProxyResponse> {
+	use secrecy::ExposeSecret;
+
+	let credential = inputs
+		.codex_oauth
+		.credential()
+		.await
+		.map_err(|_| ProxyResponse::DirectResponse(Box::new(codex_catalog_unavailable())))?;
+	let client = reqwest::Client::builder()
+		.redirect(reqwest::redirect::Policy::none())
+		.local_address(Some(std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED)))
+		.timeout(Duration::from_secs(15))
+		.build()
+		.map_err(|_| ProxyResponse::DirectResponse(Box::new(codex_catalog_unavailable())))?;
+	let url = format!(
+		"https://{}{}?client_version={}",
+		agent_llm::codex_subscription::DEFAULT_HOST_STR,
+		agent_llm::codex_subscription::MODELS_PATH,
+		CODEX_CATALOG_CLIENT_VERSION,
+	);
+	let mut request = client
+		.get(url)
+		.header(reqwest::header::ACCEPT, "application/json")
+		.header(reqwest::header::USER_AGENT, CODEX_CATALOG_USER_AGENT)
+		.header("originator", "codex_cli_rs")
+		.bearer_auth(credential.access_token.expose_secret());
+	if let Some(account_id) = credential.account_id {
+		request = request.header("chatgpt-account-id", account_id);
+	}
+	if let Some(residency) = credential.residency {
+		request = request.header("x-openai-internal-codex-residency", residency);
+	}
+	if let Some(etag) = etag {
+		request = request.header(reqwest::header::IF_NONE_MATCH, etag);
+	}
+	let mut response = request
+		.send()
+		.await
+		.map_err(|_| ProxyResponse::DirectResponse(Box::new(codex_catalog_unavailable())))?;
+	if response.status() == reqwest::StatusCode::NOT_MODIFIED {
+		return Ok(CodexCatalogFetch::NotModified);
+	}
+	if response.status() != reqwest::StatusCode::OK
+		|| !response
+			.headers()
+			.get(reqwest::header::CONTENT_TYPE)
+			.and_then(|value| value.to_str().ok())
+			.is_some_and(|value| {
+				value
+					.split(';')
+					.next()
+					.is_some_and(|media_type| media_type.trim().eq_ignore_ascii_case("application/json"))
+			})
+	{
+		return Err(ProxyResponse::DirectResponse(Box::new(
+			codex_catalog_unavailable(),
+		)));
+	}
+	let response_etag = response
+		.headers()
+		.get(reqwest::header::ETAG)
+		.and_then(|value| value.to_str().ok())
+		.map(str::to_owned);
+	let mut body = Vec::new();
+	while let Some(chunk) = response
+		.chunk()
+		.await
+		.map_err(|_| ProxyResponse::DirectResponse(Box::new(codex_catalog_unavailable())))?
+	{
+		if body.len().saturating_add(chunk.len()) > CODEX_CATALOG_MAX_BYTES {
+			return Err(ProxyResponse::DirectResponse(Box::new(
+				codex_catalog_unavailable(),
+			)));
+		}
+		body.extend_from_slice(&chunk);
+	}
+	let catalog = llm::codex_catalog::Catalog::parse(&body)
+		.map_err(|_| ProxyResponse::DirectResponse(Box::new(codex_catalog_unavailable())))?;
+	Ok(CodexCatalogFetch::Updated {
+		catalog,
+		etag: response_etag,
+	})
 }
 
 async fn apply_codex_oauth_headers(
