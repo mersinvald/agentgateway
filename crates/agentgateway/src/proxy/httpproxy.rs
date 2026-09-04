@@ -2259,6 +2259,16 @@ async fn make_backend_call(
 		);
 		let resolved = match Box::pin(router.resolve(&mut req)).await {
 			model_router::ResolveResult::DirectResponse(resp) => return Ok(resp),
+			model_router::ResolveResult::ModelList(list) => {
+				return Box::pin(async move {
+					let selected_backend = resolve_backend(list.dynamic_backend.backend, inputs.as_ref())?;
+					let concrete_policies = get_backend_policies(inputs.as_ref(), &selected_backend.backend, &selected_backend.inline_policies, route_path.clone());
+					let route_policies = route_policies.merge_backend_policies(Some(list.dynamic_backend.llm_policy));
+					let policies = Arc::new(base_policies.as_ref().clone().merge(concrete_policies));
+					let response = Box::pin(make_backend_call(inputs, route_policies, &selected_backend.backend.backend, policies, route_path, req, log, response_policies, allow_codex_model_refresh)).await?;
+					Ok(merge_model_lists(list.static_models, response).await)
+				}).await;
+			},
 			model_router::ResolveResult::Backend(resolved) => resolved,
 		};
 		let selected_backend = resolve_backend(resolved.backend, inputs.as_ref())?;
@@ -3111,6 +3121,31 @@ async fn make_backend_call(
 }
 
 const CODEX_CATALOG_MAX_BYTES: usize = 1024 * 1024;
+
+async fn merge_model_lists(mut static_models: Vec<serde_json::Value>, response: Response) -> Response {
+	let (parts, body) = response.into_parts();
+	let Ok(body) = http::read_body_with_limit(body, CODEX_CATALOG_MAX_BYTES).await else {
+		return ::http::Response::from_parts(parts, http::Body::empty());
+	};
+	let Ok(mut dynamic) = serde_json::from_slice::<serde_json::Value>(&body) else {
+		return ::http::Response::from_parts(parts, http::Body::from(body));
+	};
+	let Some(entries) = dynamic.get_mut("data").and_then(serde_json::Value::as_array_mut) else {
+		return ::http::Response::from_parts(parts, http::Body::from(body));
+	};
+	let mut ids = static_models
+		.iter()
+		.filter_map(|entry| entry.get("id").and_then(serde_json::Value::as_str))
+		.map(str::to_owned)
+		.collect::<std::collections::HashSet<_>>();
+	static_models.extend(entries.iter().filter(|entry| {
+		entry.get("id")
+			.and_then(serde_json::Value::as_str)
+			.is_some_and(|id| ids.insert(id.to_owned()))
+	}).cloned());
+	dynamic["data"] = serde_json::Value::Array(static_models);
+	::http::Response::from_parts(parts, http::Body::from(dynamic.to_string()))
+}
 
 async fn codex_models_response(
 	inputs: &ProxyInputs,

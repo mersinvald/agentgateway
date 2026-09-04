@@ -651,6 +651,8 @@ func translateModelLLMProvider(ctx RouteContext, namespace string, model *agentg
 			}
 			provider.ProviderBackend = ref
 		}
+	case llm.CodexSubscription != nil:
+		provider.Provider = &api.AIBackend_Provider_CodexSubscription{CodexSubscription: &api.AIBackend_CodexSubscription{}}
 	default:
 		return nil, fmt.Errorf("no supported LLM provider configured")
 	}
@@ -749,6 +751,8 @@ func modelLLMProvider(model *agentgateway.AgentgatewayModelSpec) (*agentgateway.
 			return nil, fmt.Errorf("custom provider requires custom configuration")
 		}
 		provider.Custom = &agentgateway.CustomProvider{CustomProviderSettings: *model.Custom}
+	case agentgateway.ModelProviderCodexSubscription:
+		provider.CodexSubscription = &agentgateway.CodexSubscriptionConfig{}
 	default:
 		return nil, fmt.Errorf("unsupported model provider %q", *model.Provider)
 	}

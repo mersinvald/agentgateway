@@ -141,7 +141,15 @@ pub struct ResolvedBackend {
 
 pub enum ResolveResult {
 	DirectResponse(Response),
+	ModelList(ModelList),
 	Backend(ResolvedBackend),
+}
+
+/// Static entries are rendered locally; a wildcard model route can contribute an
+/// authenticated provider catalog without creating a second HTTP route.
+pub struct ModelList {
+	pub static_models: Vec<serde_json::Value>,
+	pub dynamic_backend: ResolvedBackend,
 }
 
 /// The model name reserved for the gateway-owned Codex subscription authorization flow.
@@ -269,7 +277,14 @@ impl ModelRouter {
 
 	pub async fn resolve(&self, req: &mut Request) -> ResolveResult {
 		if is_model_list_request(req) {
-			return ResolveResult::DirectResponse(self.model_list_response(req));
+			let static_models = self.static_model_list(req);
+			if let Some(dynamic_backend) = self.dynamic_model_backend(req) {
+				return ResolveResult::ModelList(ModelList {
+					static_models,
+					dynamic_backend,
+				});
+			}
+			return ResolveResult::DirectResponse(Self::model_list_response(static_models));
 		}
 		let requested_model = match requested_model(req).await {
 			Ok(requested_model) => requested_model,
@@ -338,11 +353,13 @@ impl ModelRouter {
 		.await
 	}
 
-	fn model_list_response(&self, req: &Request) -> Response {
-		let data = self
+	fn static_model_list(&self, req: &Request) -> Vec<serde_json::Value> {
+		self
 			.models
 			.iter()
 			.filter(|model| model.visibility == ModelVisibility::Public)
+			// A wildcard Codex route is an inference dispatch rule, not a model record.
+			.filter(|model| model.name != "*")
 			.filter(|model| model_authorized(model, req))
 			.flat_map(|model| {
 				api_key_discoverable_models(req, &model.name)
@@ -355,7 +372,20 @@ impl ModelRouter {
 					.filter(|model| api_key_model_authorized(req, &model.name))
 					.map(|model| model_list_entry(&model.name, model.created)),
 			)
-			.collect::<Vec<_>>();
+			.collect()
+	}
+
+	fn dynamic_model_backend(&self, req: &Request) -> Option<ResolvedBackend> {
+		self.models.iter().find_map(|model| {
+			(model.name == "*" && model.visibility == ModelVisibility::Public && model_authorized(model, req))
+				.then(|| ResolvedBackend {
+					backend: model.backend.clone(),
+					llm_policy: model.policies.llm.clone(),
+				})
+		})
+	}
+
+	fn model_list_response(data: Vec<serde_json::Value>) -> Response {
 		let body = serde_json::json!({
 			"data": data,
 			"object": "list",
@@ -699,15 +729,11 @@ fn model_list_entry(id: &str, created: u64) -> serde_json::Value {
 }
 
 fn is_model_list_request(req: &Request) -> bool {
+	if req.method() != ::http::Method::GET {
+		return false;
+	}
 	let path = req.uri().path().trim_end_matches('/');
-	path == "/v1/models"
-		|| path
-			.strip_prefix("/v1/models")
-			.is_some_and(|suffix| suffix.starts_with('/'))
-		|| path == "/models"
-		|| path
-			.strip_prefix("/models")
-			.is_some_and(|suffix| suffix.starts_with('/'))
+	path == "/v1/models" || path == "/models"
 }
 
 fn header_matches(matches: &[Vec<HeaderMatch>], req: &Request) -> bool {
