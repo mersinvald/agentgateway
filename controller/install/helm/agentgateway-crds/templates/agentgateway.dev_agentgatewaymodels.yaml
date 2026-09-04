@@ -5012,6 +5012,7 @@ spec:
                 - Baseten
                 - Bedrock
                 - Cerebras
+                - CodexSubscription
                 - Cohere
                 - Custom
                 - Deepinfra
