@@ -3139,6 +3139,10 @@ async fn make_backend_call(
 }
 
 const CODEX_CATALOG_MAX_BYTES: usize = 1024 * 1024;
+// Codex applies model visibility and edge policy using its native client
+// version. Keep this compatibility version aligned with the tested release.
+const CODEX_CATALOG_CLIENT_VERSION: &str = "0.153.2";
+const CODEX_CATALOG_USER_AGENT: &str = "codex_cli_rs/0.153.2";
 
 async fn merge_model_lists(
 	mut static_models: Vec<serde_json::Value>,
@@ -3438,7 +3442,7 @@ async fn fetch_codex_catalog(
 		"{}{}?client_version={}",
 		path_prefix.unwrap_or("").trim_end_matches('/'),
 		agent_llm::codex_subscription::MODELS_PATH,
-		env!("CARGO_PKG_VERSION"),
+		CODEX_CATALOG_CLIENT_VERSION,
 	);
 	let authority = if has_host_override {
 		source_authority.unwrap_or_else(|| Authority::from_static("catalog.invalid"))
@@ -3454,14 +3458,14 @@ async fn fetch_codex_catalog(
 	request
 		.headers_mut()
 		.insert(header::ACCEPT, HeaderValue::from_static("application/json"));
-	let user_agent = HeaderValue::from_str(&format!(
-		"agentgateway/{}",
-		agent_core::version::BuildInfo::new().version
-	))
-	.map_err(|_| {
-		ProxyError::ProcessingString("Agentgateway build version is not a valid User-Agent".into())
-	})?;
-	request.headers_mut().insert(header::USER_AGENT, user_agent);
+	request.headers_mut().insert(
+		header::USER_AGENT,
+		HeaderValue::from_static(CODEX_CATALOG_USER_AGENT),
+	);
+	request.headers_mut().insert(
+		HeaderName::from_static("originator"),
+		HeaderValue::from_static("codex_cli_rs"),
+	);
 	if let Some(etag) = etag
 		&& let Ok(etag) = HeaderValue::from_str(etag)
 	{

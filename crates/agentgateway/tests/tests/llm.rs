@@ -431,20 +431,11 @@ async fn llm_codex_subscription_models_uses_catalog_cache() {
 	let request = single_upstream_request(&mock).await;
 	assert_eq!(
 		&request.url[Position::BeforePath..Position::AfterQuery],
-		format!(
-			"/backend-api/codex/models?client_version={}",
-			env!("CARGO_PKG_VERSION")
-		),
+		"/backend-api/codex/models?client_version=0.153.2",
 	);
 	assert_eq!(request.headers["accept"], "application/json");
-	assert!(request.headers.get("originator").is_none());
-	assert_eq!(
-		request.headers["user-agent"],
-		format!(
-			"agentgateway/{}",
-			agent_core::version::BuildInfo::new().version
-		)
-	);
+	assert_eq!(request.headers["originator"], "codex_cli_rs");
+	assert_eq!(request.headers["user-agent"], "codex_cli_rs/0.153.2");
 	assert_eq!(
 		request.headers["authorization"],
 		"Bearer test-codex-access-token"
