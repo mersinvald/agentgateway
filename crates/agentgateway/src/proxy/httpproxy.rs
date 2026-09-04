@@ -3121,17 +3121,24 @@ async fn make_backend_call(
 }
 
 const CODEX_CATALOG_MAX_BYTES: usize = 1024 * 1024;
+const CODEX_CATALOG_ORIGINATOR: &str = "codex_cli_rs";
+const CODEX_CATALOG_USER_AGENT: &str = concat!("codex_cli_rs/", env!("CARGO_PKG_VERSION"));
 
 async fn merge_model_lists(mut static_models: Vec<serde_json::Value>, response: Response) -> Response {
 	let (parts, body) = response.into_parts();
+	if !parts.status.is_success() {
+		// The dynamic entry is an authenticated Codex catalog. Never expose an
+		// upstream error document (such as a Cloudflare challenge) as this API's response.
+		return codex_catalog_unavailable();
+	}
 	let Ok(body) = http::read_body_with_limit(body, CODEX_CATALOG_MAX_BYTES).await else {
-		return ::http::Response::from_parts(parts, http::Body::empty());
+		return codex_catalog_unavailable();
 	};
 	let Ok(mut dynamic) = serde_json::from_slice::<serde_json::Value>(&body) else {
-		return ::http::Response::from_parts(parts, http::Body::from(body));
+		return codex_catalog_unavailable();
 	};
 	let Some(entries) = dynamic.get_mut("data").and_then(serde_json::Value::as_array_mut) else {
-		return ::http::Response::from_parts(parts, http::Body::from(body));
+		return codex_catalog_unavailable();
 	};
 	let mut ids = static_models
 		.iter()
@@ -3419,6 +3426,16 @@ async fn fetch_codex_catalog(
 	request
 		.headers_mut()
 		.insert(header::ACCEPT, HeaderValue::from_static("application/json"));
+	// The catalog endpoint is owned by the native Codex API surface. Its edge
+	// requires an explicit Codex client identity rather than the transport default.
+	request.headers_mut().insert(
+		HeaderName::from_static("originator"),
+		HeaderValue::from_static(CODEX_CATALOG_ORIGINATOR),
+	);
+	request.headers_mut().insert(
+		header::USER_AGENT,
+		HeaderValue::from_static(CODEX_CATALOG_USER_AGENT),
+	);
 	if let Some(etag) = etag
 		&& let Ok(etag) = HeaderValue::from_str(etag)
 	{
@@ -3443,6 +3460,21 @@ async fn fetch_codex_catalog(
 	}
 	if response.status() != StatusCode::OK {
 		return Err(ProxyError::ProcessingString("Codex catalog request failed".into()).into());
+	}
+	if !response
+		.headers()
+		.get(header::CONTENT_TYPE)
+		.and_then(|value| value.to_str().ok())
+		.is_some_and(|value| {
+			value
+				.split(';')
+				.next()
+				.is_some_and(|media_type| media_type.trim().eq_ignore_ascii_case("application/json"))
+		})
+	{
+		return Err(
+			ProxyError::ProcessingString("Codex catalog response was not JSON".into()).into(),
+		);
 	}
 	let etag = response
 		.headers()
@@ -4069,7 +4101,8 @@ mod tests {
 
 	use super::{
 		SpiffeBackendTLS, apply_auto_hostname, apply_llm_request_policies, hop_by_hop_headers,
-		resolved_workload_target_hostname, select_service_target_port, spiffe_backend_alpns,
+		merge_model_lists, resolved_workload_target_hostname, select_service_target_port,
+		spiffe_backend_alpns,
 	};
 
 	#[test]
@@ -4130,6 +4163,23 @@ mod tests {
 	use crate::types::discovery::{AppProtocol, Endpoint, HealthStatus, Service};
 	use crate::types::local::LocalAIBackend;
 	use crate::{http, llm};
+
+	#[tokio::test]
+	async fn model_list_hides_non_json_dynamic_catalog_failure() {
+		let response = ::http::Response::builder()
+			.status(::http::StatusCode::FORBIDDEN)
+			.header(::http::header::CONTENT_TYPE, "text/html")
+			.body(http::Body::from("<html>Cloudflare challenge</html>"))
+			.expect("response is valid");
+
+		let response = merge_model_lists(vec![], response).await;
+		assert_eq!(response.status(), ::http::StatusCode::SERVICE_UNAVAILABLE);
+		assert_eq!(response.headers()[::http::header::CONTENT_TYPE], "application/json");
+		let body: serde_json::Value =
+			serde_json::from_slice(&proxymock::read_body_raw(response.into_body()).await)
+				.expect("sanitized catalog failure is JSON");
+		assert_eq!(body["error"]["code"], "catalog_unavailable");
+	}
 
 	#[test]
 	fn configured_request_headers_are_marked_sensitive_at_ingress() {

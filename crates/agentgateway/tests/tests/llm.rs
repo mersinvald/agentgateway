@@ -437,6 +437,11 @@ async fn llm_codex_subscription_models_uses_catalog_cache() {
 		),
 	);
 	assert_eq!(request.headers["accept"], "application/json");
+	assert_eq!(request.headers["originator"], "codex_cli_rs");
+	assert_eq!(
+		request.headers["user-agent"],
+		format!("codex_cli_rs/{}", env!("CARGO_PKG_VERSION"))
+	);
 	assert_eq!(
 		request.headers["authorization"],
 		"Bearer test-codex-access-token"
@@ -449,6 +454,41 @@ async fn llm_codex_subscription_models_uses_catalog_cache() {
 		request.headers["x-openai-internal-codex-residency"],
 		"test-codex-residency"
 	);
+}
+
+#[tokio::test]
+async fn llm_codex_subscription_models_sanitizes_html_catalog_response() {
+	let mock = MockServer::start().await;
+	Mock::given(wiremock::matchers::method("GET"))
+		.and(wiremock::matchers::path("/backend-api/codex/models"))
+		.respond_with(
+			ResponseTemplate::new(StatusCode::OK.as_u16())
+				.insert_header("content-type", "text/html; charset=UTF-8")
+				.set_body_string("<html>Cloudflare challenge</html>"),
+		)
+		.mount(&mock)
+		.await;
+	let mut provider = llm_named_provider(
+		&mock,
+		AIProvider::CodexSubscription(codex_subscription::Provider {
+			refresh_interval: Duration::from_secs(60),
+			stale_while_revalidate: Duration::from_secs(60),
+			allow_models: vec!["*".into()],
+			deny_models: vec![],
+		}),
+		false,
+	);
+	provider.policies = Some(
+		serde_json::from_value(json!({"ai": {"routes": {"/v1/models": "models"}}}))
+			.expect("models route policy"),
+	);
+	let (_mock, _bind, io) = setup_llm_named_provider_mock(mock, provider, "{}");
+
+	let response = send_request(io, Method::GET, "http://lo/v1/models").await;
+	assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+	assert_eq!(response.headers()[header::CONTENT_TYPE], "application/json");
+	let body: Value = serde_json::from_slice(&read_body_raw(response.into_body()).await).unwrap();
+	assert_eq!(body["error"]["code"], "catalog_unavailable");
 }
 
 #[tokio::test]
