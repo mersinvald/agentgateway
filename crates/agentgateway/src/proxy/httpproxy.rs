@@ -3501,6 +3501,11 @@ async fn fetch_codex_catalog(
 		return Ok(CodexCatalogFetch::NotModified);
 	}
 	if response.status() != StatusCode::OK {
+		warn!(
+			status = response.status().as_u16(),
+			stage = "backend_http_status",
+			"Codex catalog request failed"
+		);
 		return Err(ProxyError::ProcessingString("Codex catalog request failed".into()).into());
 	}
 	if !response
@@ -3528,7 +3533,10 @@ async fn fetch_codex_catalog(
 	.await
 	.map_err(|_| ProxyError::ProcessingString("Codex catalog response was invalid".into()))?;
 	let catalog = llm::codex_catalog::Catalog::parse(&body)
-		.map_err(|_| ProxyError::ProcessingString("Codex catalog response was invalid".into()))?;
+		.map_err(|error| {
+			warn!(category = ?error.classify(), line = error.line(), column = error.column(), bytes = body.len(), stage = "backend_parse", "Codex catalog parsing failed");
+			ProxyError::ProcessingString("Codex catalog response was invalid".into())
+		})?;
 	Ok(CodexCatalogFetch::Updated { catalog, etag })
 }
 
@@ -3542,13 +3550,13 @@ async fn fetch_default_codex_catalog(
 		.codex_oauth
 		.credential()
 		.await
-		.map_err(|_| ProxyResponse::DirectResponse(Box::new(codex_catalog_unavailable())))?;
+		.map_err(|_| codex_catalog_failure("credential"))?;
 	let client = reqwest::Client::builder()
 		.redirect(reqwest::redirect::Policy::none())
 		.local_address(Some(std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED)))
 		.timeout(Duration::from_secs(15))
 		.build()
-		.map_err(|_| ProxyResponse::DirectResponse(Box::new(codex_catalog_unavailable())))?;
+		.map_err(|_| codex_catalog_failure("client_configuration"))?;
 	let url = format!(
 		"https://{}{}?client_version={}",
 		agent_llm::codex_subscription::DEFAULT_HOST_STR,
@@ -3570,10 +3578,14 @@ async fn fetch_default_codex_catalog(
 	if let Some(etag) = etag {
 		request = request.header(reqwest::header::IF_NONE_MATCH, etag);
 	}
-	let mut response = request
-		.send()
-		.await
-		.map_err(|_| ProxyResponse::DirectResponse(Box::new(codex_catalog_unavailable())))?;
+	let mut response = request.send().await.map_err(|error| {
+		warn!(
+			timeout = error.is_timeout(),
+			connect = error.is_connect(),
+			"Codex catalog transport failed"
+		);
+		codex_catalog_failure("transport")
+	})?;
 	if response.status() == reqwest::StatusCode::NOT_MODIFIED {
 		return Ok(CodexCatalogFetch::NotModified);
 	}
@@ -3589,9 +3601,11 @@ async fn fetch_default_codex_catalog(
 					.is_some_and(|media_type| media_type.trim().eq_ignore_ascii_case("application/json"))
 			})
 	{
-		return Err(ProxyResponse::DirectResponse(Box::new(
-			codex_catalog_unavailable(),
-		)));
+		warn!(
+			status = response.status().as_u16(),
+			"Codex catalog HTTP status or content type rejected"
+		);
+		return Err(codex_catalog_failure("http_response"));
 	}
 	let response_etag = response
 		.headers()
@@ -3602,21 +3616,29 @@ async fn fetch_default_codex_catalog(
 	while let Some(chunk) = response
 		.chunk()
 		.await
-		.map_err(|_| ProxyResponse::DirectResponse(Box::new(codex_catalog_unavailable())))?
+		.map_err(|_| codex_catalog_failure("body_read"))?
 	{
 		if body.len().saturating_add(chunk.len()) > CODEX_CATALOG_MAX_BYTES {
-			return Err(ProxyResponse::DirectResponse(Box::new(
-				codex_catalog_unavailable(),
-			)));
+			return Err(codex_catalog_failure("body_limit"));
 		}
 		body.extend_from_slice(&chunk);
 	}
 	let catalog = llm::codex_catalog::Catalog::parse(&body)
-		.map_err(|_| ProxyResponse::DirectResponse(Box::new(codex_catalog_unavailable())))?;
+		.map_err(|error| {
+			// Serde error text can contain upstream values; log only classification
+			// and offsets, never the error text or response body.
+			warn!(category = ?error.classify(), line = error.line(), column = error.column(), bytes = body.len(), "Codex catalog parsing failed");
+			codex_catalog_failure("parse")
+		})?;
 	Ok(CodexCatalogFetch::Updated {
 		catalog,
 		etag: response_etag,
 	})
+}
+
+fn codex_catalog_failure(stage: &'static str) -> ProxyResponse {
+	warn!(stage, "Codex catalog unavailable");
+	ProxyResponse::DirectResponse(Box::new(codex_catalog_unavailable()))
 }
 
 async fn apply_codex_oauth_headers(
