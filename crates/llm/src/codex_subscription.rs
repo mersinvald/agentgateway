@@ -7,6 +7,36 @@ pub const DEFAULT_HOST_STR: &str = "chatgpt.com";
 pub const DEFAULT_HOST: Strng = strng::literal!(DEFAULT_HOST_STR);
 pub const DEFAULT_BASE_PATH: &str = "/backend-api/codex";
 pub const MODELS_PATH: &str = "/backend-api/codex/models";
+pub const MODEL_PREFIX: &str = "openai/";
+pub const MODEL_PATTERN: &str = "openai/*";
+
+pub fn public_model(slug: &str) -> String {
+	format!("{MODEL_PREFIX}{slug}")
+}
+
+pub fn upstream_model(model: &str) -> Option<&str> {
+	model
+		.strip_prefix(MODEL_PREFIX)
+		.filter(|slug| !slug.is_empty())
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	#[test]
+	fn public_namespace_is_removed_exactly_once() {
+		assert_eq!(public_model("gpt-test"), "openai/gpt-test");
+		assert_eq!(upstream_model("openai/gpt-test"), Some("gpt-test"));
+		assert_eq!(
+			upstream_model("openai/openai/gpt-test"),
+			Some("openai/gpt-test")
+		);
+		assert_eq!(upstream_model("openai/"), None);
+		assert_eq!(upstream_model("gpt-test"), None);
+		assert_eq!(upstream_model("other/gpt-test"), None);
+	}
+}
 
 #[apply(schema!)]
 pub struct Provider {

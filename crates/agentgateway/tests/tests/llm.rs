@@ -424,7 +424,7 @@ async fn llm_codex_subscription_models_uses_catalog_cache() {
 		);
 		let body: Value = serde_json::from_slice(&read_body_raw(response.into_body()).await).unwrap();
 		assert_eq!(body["object"], "list");
-		assert_eq!(body["data"][0]["id"], "gpt-codex");
+		assert_eq!(body["data"][0]["id"], "openai/gpt-codex");
 		assert_eq!(body["data"][0]["object"], "model");
 		assert_eq!(body["data"].as_array().unwrap().len(), 1);
 	}
@@ -531,7 +531,7 @@ async fn llm_codex_subscription_models_revalidates_with_etag() {
 	let response = send_request(io, Method::GET, "http://lo/v1/models").await;
 	assert_eq!(response.status(), StatusCode::OK);
 	let body: Value = serde_json::from_slice(&read_body_raw(response.into_body()).await).unwrap();
-	assert_eq!(body["data"][0]["id"], "gpt-codex");
+	assert_eq!(body["data"][0]["id"], "openai/gpt-codex");
 	assert_eq!(mock.received_requests().await.unwrap().len(), 1);
 }
 
@@ -570,19 +570,28 @@ async fn llm_codex_subscription_admits_catalog_models_before_inference() {
 	);
 	let (mock, _bind, io) = setup_llm_named_provider_mock(mock, provider, "{}");
 
-	let response = send_completions_with_model(io.clone(), "gpt-codex-hidden", &[]).await;
+	let response = send_completions_with_model(io.clone(), "openai/gpt-codex-hidden", &[]).await;
 	assert_eq!(response.status(), StatusCode::BAD_REQUEST);
 	let body: Value = serde_json::from_slice(&read_body_raw(response.into_body()).await).unwrap();
 	assert_eq!(body["error"]["type"], "invalid_request_error");
 	assert_eq!(body["error"]["code"], "model_not_found");
 
-	let response = send_completions_with_model(io.clone(), "gpt-codex-blocked", &[]).await;
+	let response = send_completions_with_model(io.clone(), "openai/gpt-codex-blocked", &[]).await;
 	assert_eq!(response.status(), StatusCode::BAD_REQUEST);
 	let body: Value = serde_json::from_slice(&read_body_raw(response.into_body()).await).unwrap();
 	assert_eq!(body["error"]["type"], "invalid_request_error");
 	assert_eq!(body["error"]["code"], "model_not_allowed");
 
-	let response = send_completions_with_model(io, "gpt-codex-2026-08-25", &[]).await;
+	for invalid in [
+		"gpt-codex-2026-08-25",
+		"other/gpt-codex-2026-08-25",
+		"openai/",
+		"openai/openai/gpt-codex-2026-08-25",
+	] {
+		let response = send_completions_with_model(io.clone(), invalid, &[]).await;
+		assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+	}
+	let response = send_completions_with_model(io, "openai/gpt-codex-2026-08-25", &[]).await;
 	assert_eq!(response.status(), StatusCode::OK);
 	let _ = read_body_raw(response.into_body()).await;
 
@@ -704,7 +713,7 @@ async fn llm_codex_subscription_refreshes_model_unavailable_once() {
 	);
 	let (_mock, _bind, io) = setup_llm_named_provider_mock(mock, provider, "{}");
 
-	let response = send_completions_with_model(io, "gpt-codex", &[]).await;
+	let response = send_completions_with_model(io, "openai/gpt-codex", &[]).await;
 	assert_eq!(response.status(), StatusCode::OK);
 	let _ = read_body_raw(response.into_body()).await;
 	assert_eq!(catalog_requests.load(Ordering::SeqCst), 2);
@@ -748,7 +757,7 @@ async fn llm_codex_subscription_does_not_refresh_for_message_only_match() {
 	);
 	let (_mock, _bind, io) = setup_llm_named_provider_mock(mock, provider, "{}");
 
-	let response = send_completions_with_model(io, "gpt-codex", &[]).await;
+	let response = send_completions_with_model(io, "openai/gpt-codex", &[]).await;
 	assert_eq!(response.status(), StatusCode::NOT_FOUND);
 	assert_eq!(response.headers()["x-original"], "yes");
 	let body: Value = serde_json::from_slice(&read_body_raw(response.into_body()).await).unwrap();
@@ -794,7 +803,7 @@ async fn llm_codex_subscription_preserves_unavailable_response_when_refresh_remo
 	);
 	let (_mock, _bind, io) = setup_llm_named_provider_mock(mock, provider, "{}");
 
-	let response = send_completions_with_model(io, "gpt-codex", &[]).await;
+	let response = send_completions_with_model(io, "openai/gpt-codex", &[]).await;
 	assert_eq!(response.status(), StatusCode::NOT_FOUND);
 	assert_eq!(response.headers()["x-original"], "yes");
 	let body: Value = serde_json::from_slice(&read_body_raw(response.into_body()).await).unwrap();

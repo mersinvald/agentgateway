@@ -2255,6 +2255,20 @@ async fn make_backend_call(
 			router
 				.as_ref()
 				.clone()
+				.with_codex_namespaces(|reference| {
+					let Ok(selected) = resolve_backend(reference.clone(), inputs.as_ref()) else {
+						return false;
+					};
+					let Backend::AI(_, ai) = &selected.backend.backend else {
+						return false;
+					};
+					let providers = ai.providers.iter();
+					!providers.index().is_empty()
+						&& providers
+							.index()
+							.values()
+							.all(|entry| matches!(entry.endpoint.provider, AIProvider::CodexSubscription(_)))
+				})
 				.with_codex_subscription_auth(inputs.codex_oauth.clone()),
 		);
 		let resolved = match Box::pin(router.resolve(&mut req)).await {
@@ -2611,6 +2625,16 @@ async fn make_backend_call(
 		if let Some(llm) = &backend_call.backend_policies.llm_provider {
 			// LLM requires CEL execution after the snapshot so we do not clear extensions
 			let mut req = req.take_and_snapshot_without_clearing_extensions(log.as_mut())?;
+			if matches!(llm.provider, AIProvider::CodexSubscription(_))
+				&& req.method() == ::http::Method::POST
+				&& matches!(
+					req.uri().path().trim_end_matches('/'),
+					"/v1/chat/completions" | "/v1/responses"
+				) {
+				Box::pin(model_router::normalize_codex_model(&mut req))
+					.await
+					.map_err(ProxyResponse::DirectResponse)?;
+			}
 			let route_type = llm_request_policies
 				.llm
 				.as_ref()
@@ -2806,6 +2830,9 @@ async fn make_backend_call(
 							llm.host_override.is_some(),
 							req.uri().authority().cloned(),
 							req.headers(),
+							req
+								.extensions()
+								.get::<crate::http::apikey::ModelAccessPolicy>(),
 						)
 						.await;
 					}
@@ -3194,6 +3221,7 @@ async fn codex_models_response(
 	has_host_override: bool,
 	source_authority: Option<Authority>,
 	headers: &HeaderMap,
+	model_access: Option<&crate::http::apikey::ModelAccessPolicy>,
 ) -> Result<Response, ProxyResponse> {
 	match codex_catalog_snapshot(
 		inputs,
@@ -3207,7 +3235,7 @@ async fn codex_models_response(
 	)
 	.await
 	{
-		Ok(snapshot) => Ok(codex_models_list(snapshot, provider)),
+		Ok(snapshot) => Ok(codex_models_list(snapshot, provider, model_access)),
 		Err(response) => Ok(response),
 	}
 }
@@ -3397,16 +3425,17 @@ fn codex_model_admission_response(message: &str, code: &str) -> Response {
 fn codex_models_list(
 	snapshot: llm::codex_catalog::Snapshot,
 	provider: &agent_llm::codex_subscription::Provider,
+	model_access: Option<&crate::http::apikey::ModelAccessPolicy>,
 ) -> Response {
 	::http::Response::builder()
 		.status(StatusCode::OK)
 		.header(header::CONTENT_TYPE, "application/json")
 		.header(header::CACHE_CONTROL, "private, no-cache")
-		.body(http::Body::from(
-			snapshot
-				.catalog
-				.openai_response(&provider.allow_models, &provider.deny_models),
-		))
+		.body(http::Body::from(snapshot.catalog.openai_response_for(
+			&provider.allow_models,
+			&provider.deny_models,
+			model_access,
+		)))
 		.expect("Codex model response is valid")
 }
 

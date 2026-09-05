@@ -1,5 +1,47 @@
 use super::*;
 
+#[tokio::test]
+async fn codex_namespace_authorizes_public_ids_before_rewrite() {
+	let policy = ModelAccessPolicy {
+		allowed_models: AllowedModels::compile(Some(vec!["openai/gpt-luna".into()])).unwrap(),
+	};
+	let catalog = crate::llm::codex_catalog::Catalog::parse(
+		br#"{"models":[
+		{"slug":"gpt-luna","visibility":"list","supported_in_api":true},
+		{"slug":"gpt-other","visibility":"list","supported_in_api":true}
+	]}"#,
+	)
+	.unwrap();
+	let response: serde_json::Value =
+		serde_json::from_slice(&catalog.openai_response_for(&[strng::new("*")], &[], Some(&policy)))
+			.unwrap();
+	assert_eq!(response["data"].as_array().unwrap().len(), 1);
+	assert_eq!(response["data"][0]["id"], "openai/gpt-luna");
+	for (model, allowed) in [
+		("openai/gpt-luna", true),
+		("openai/gpt-other", false),
+		("gpt-luna", false),
+	] {
+		let mut request = ::http::Request::builder()
+			.uri("/v1/responses")
+			.body(http::Body::from(
+				serde_json::json!({"model":model,"input":"ok"}).to_string(),
+			))
+			.unwrap();
+		request.extensions_mut().insert(policy.clone());
+		let result = crate::llm::model_router::normalize_codex_model(&mut request).await;
+		assert_eq!(result.is_ok(), allowed);
+		if allowed {
+			let bytes = http::read_body_with_limit(request.into_body(), 1024)
+				.await
+				.unwrap();
+			let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+			assert_eq!(body["model"], "gpt-luna");
+			assert_eq!(body["input"], "ok");
+		}
+	}
+}
+
 #[test]
 fn test_apikey_equality() {
 	// APIKey equality must use a constant-time comparison (subtle::ConstantTimeEq): the gateway

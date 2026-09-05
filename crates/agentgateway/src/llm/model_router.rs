@@ -57,6 +57,7 @@ impl ModelVisibility {
 pub fn default_route_types() -> Arc<llm::Policy> {
 	Arc::new(llm::Policy {
 		routes: [
+			(strng::new("/v1/models"), llm::RouteType::Models),
 			(
 				strng::new("/v1/chat/completions"),
 				llm::RouteType::Completions,
@@ -131,6 +132,8 @@ pub struct ModelRouter {
 	virtual_models: Vec<VirtualModelRoute>,
 	#[serde(skip)]
 	codex_subscription_auth: Option<Arc<dyn CodexSubscriptionAuth>>,
+	#[serde(skip)]
+	codex_wildcards: Vec<usize>,
 }
 
 #[derive(Debug, Clone)]
@@ -264,6 +267,7 @@ impl ModelRouter {
 			models,
 			virtual_models,
 			codex_subscription_auth: None,
+			codex_wildcards: vec![],
 		}
 	}
 
@@ -272,6 +276,25 @@ impl ModelRouter {
 		codex_subscription_auth: Arc<dyn CodexSubscriptionAuth>,
 	) -> Self {
 		self.codex_subscription_auth = Some(codex_subscription_auth);
+		self
+	}
+
+	pub fn with_codex_namespaces(
+		mut self,
+		is_codex: impl Fn(&RouteBackendReference) -> bool,
+	) -> Self {
+		self.codex_wildcards = self
+			.models
+			.iter()
+			.enumerate()
+			.filter(|(_, model)| {
+				matches!(
+					model.name.as_str(),
+					"*" | llm::codex_subscription::MODEL_PATTERN
+				) && is_codex(&model.backend)
+			})
+			.map(|(index, _)| index)
+			.collect();
 		self
 	}
 
@@ -357,6 +380,9 @@ impl ModelRouter {
 		self
 			.models
 			.iter()
+			.enumerate()
+			.filter(|(index, _)| !self.codex_wildcards.contains(index))
+			.map(|(_, model)| model)
 			.filter(|model| model.visibility == ModelVisibility::Public)
 			// A wildcard Codex route is an inference dispatch rule, not a model record.
 			.filter(|model| model.name != "*")
@@ -376,8 +402,8 @@ impl ModelRouter {
 	}
 
 	fn dynamic_model_backend(&self, req: &Request) -> Option<ResolvedBackend> {
-		self.models.iter().find_map(|model| {
-			(model.name == "*"
+		self.models.iter().enumerate().find_map(|(index, model)| {
+			((model.name == "*" || self.codex_wildcards.contains(&index))
 				&& model.visibility == ModelVisibility::Public
 				&& model_authorized(model, req))
 			.then(|| ResolvedBackend {
@@ -483,22 +509,31 @@ impl ModelRouter {
 		req: &Request,
 	) -> Result<Option<ResolvedBackend>, ()> {
 		// `models` can store things like `provider/*`. The concrete `requested_model` will be like `provider/real-model`.
-		let matches = |model: &ModelRoute| {
+		let matches = |index: usize, model: &ModelRoute| {
 			(allow_internal || model.visibility == ModelVisibility::Public)
+				&& (!self.codex_wildcards.contains(&index)
+					|| llm::codex_subscription::upstream_model(requested_model).is_some())
 				&& model_name_matches(&model.name, requested_model)
 				&& header_matches(&model.header_matches, req)
 		};
 		let Some(model) = self
 			.models
 			.iter()
-			.find(|model| matches(model) && model_authorized(model, req))
+			.enumerate()
+			.find(|(index, model)| matches(*index, model) && model_authorized(model, req))
 		else {
-			return if self.models.iter().any(matches) {
+			return if self
+				.models
+				.iter()
+				.enumerate()
+				.any(|(index, model)| matches(index, model))
+			{
 				Err(())
 			} else {
 				Ok(None)
 			};
 		};
+		let (_, model) = model;
 		Ok(Some(ResolvedBackend {
 			backend: model.backend.clone(),
 			llm_policy: model.policies.llm.clone(),
@@ -820,6 +855,36 @@ fn rewrite_request_model(
 		// TODO: Rewrite multipart model fields for virtual model routing.
 		RequestedModelLocation::Multipart => Ok(()),
 	}
+}
+
+pub(crate) async fn normalize_codex_model(req: &mut Request) -> RouterResult<()> {
+	let requested = requested_model(req).await?;
+	if requested.model == CODEX_SUBSCRIPTION_AUTH_MODEL {
+		return Ok(());
+	}
+	let authorized_name = req
+		.extensions()
+		.get::<TransformationMetadata>()
+		.and_then(|metadata| metadata.0.get("agentgateway_user_model"))
+		.and_then(Value::as_str)
+		.unwrap_or(&requested.model);
+	if !api_key_model_authorized(req, authorized_name) {
+		return Err(Box::new(api_key_model_authorization_denied_response()));
+	}
+	let Some(slug) = llm::codex_subscription::upstream_model(&requested.model) else {
+		return Err(Box::new(llm_error_response(
+			::http::StatusCode::BAD_REQUEST,
+			"Codex models require an openai/ prefix and a model ID",
+			"model_not_found",
+		)));
+	};
+	req
+		.extensions_mut()
+		.get_or_insert_with(TransformationMetadata::default)
+		.0
+		.entry("agentgateway_user_model".to_string())
+		.or_insert_with(|| Value::String(requested.model.clone()));
+	rewrite_request_model(req, requested.location, slug)
 }
 
 fn rewrite_body_model(req: &mut Request, mut body: Value, target: &str) -> RouterResult<()> {
@@ -1680,6 +1745,7 @@ mod tests {
 	#[test]
 	fn default_routes_preserve_existing_suffixes() {
 		let policy = default_route_types();
+		assert_eq!(policy.resolve_route("/v1/models"), llm::RouteType::Models);
 		assert_eq!(
 			policy.resolve_route("/v1/projects/p/locations/us/publishers/anthropic/models/m:rawPredict"),
 			llm::RouteType::Messages
@@ -1701,6 +1767,66 @@ mod tests {
 		assert_eq!(
 			policy.resolve_route("/v1/anything/else"),
 			llm::RouteType::Passthrough
+		);
+	}
+
+	#[test]
+	fn codex_wildcards_require_public_namespace() {
+		let wildcard = ModelRoute {
+			id: None,
+			name: "*".into(),
+			created: 0,
+			visibility: ModelVisibility::Public,
+			header_matches: vec![],
+			backend: RouteBackendReference {
+				weight: 1,
+				target: RouteBackendTarget::Invalid,
+				inline_policies: vec![],
+			},
+			policies: ModelRoutePolicies {
+				llm: default_route_types(),
+				authorization: None,
+			},
+			backend_policies: vec![],
+		};
+		let req = ::http::Request::builder()
+			.uri("/v1/responses")
+			.body(http::Body::empty())
+			.unwrap();
+		let generic = ModelRouter::new(vec![wildcard.clone()], vec![]);
+		assert!(
+			generic
+				.resolve_concrete_model("other/model", false, &req)
+				.unwrap()
+				.is_some()
+		);
+		let router = generic.with_codex_namespaces(|_| true);
+		for model in ["gpt-test", "other/gpt-test", "openai/"] {
+			assert!(
+				router
+					.resolve_concrete_model(model, false, &req)
+					.unwrap()
+					.is_none()
+			);
+		}
+		assert!(
+			router
+				.resolve_concrete_model("openai/gpt-test", false, &req)
+				.unwrap()
+				.is_some()
+		);
+		let mut exact = wildcard.clone();
+		exact.name = "Qwen/model".into();
+		exact.backend.weight = 7;
+		let router = ModelRouter::new(vec![exact, wildcard], vec![]).with_codex_namespaces(|_| true);
+		assert_eq!(
+			router
+				.resolve_concrete_model("Qwen/model", false, &req)
+				.unwrap()
+				.unwrap()
+				.backend
+				.weight,
+			7
 		);
 	}
 }

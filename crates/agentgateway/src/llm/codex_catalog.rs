@@ -335,13 +335,30 @@ impl Catalog {
 	}
 
 	pub fn openai_response(&self, allow: &[Strng], deny: &[Strng]) -> Vec<u8> {
+		self.openai_response_for(allow, deny, None)
+	}
+
+	pub fn openai_response_for(
+		&self,
+		allow: &[Strng],
+		deny: &[Strng],
+		policy: Option<&crate::http::apikey::ModelAccessPolicy>,
+	) -> Vec<u8> {
 		let data: Vec<Value> = self
 			.models
 			.iter()
 			.filter(|model| self.admit(&model.slug, allow, deny) == Admission::Allowed)
+			.filter(|model| {
+				policy.is_none_or(|policy| {
+					policy.allows(&agent_llm::codex_subscription::public_model(&model.slug))
+				})
+			})
 			.map(|model| {
 				let mut record = Map::new();
-				record.insert("id".into(), Value::String(model.slug.clone()));
+				record.insert(
+					"id".into(),
+					Value::String(agent_llm::codex_subscription::public_model(&model.slug)),
+				);
 				record.insert("object".into(), Value::String("model".into()));
 				record.insert("created".into(), Value::from(0));
 				record.insert("owned_by".into(), Value::String("openai".into()));
@@ -412,7 +429,7 @@ mod tests {
 		);
 		assert_eq!(catalog.admit("gpt-high", &allow, &[]), Admission::Allowed);
 		let response: Value = serde_json::from_slice(&catalog.openai_response(&allow, &[])).unwrap();
-		assert_eq!(response["data"][0]["id"], "gpt-high");
+		assert_eq!(response["data"][0]["id"], "openai/gpt-high");
 		assert_eq!(response["data"][1]["context_window"], 100);
 		assert_eq!(response["data"][1]["visibility"], "list");
 		assert_eq!(response["data"][1]["supported_in_api"], true);
@@ -440,7 +457,7 @@ mod tests {
 		let response: Value =
 			serde_json::from_slice(&catalog.openai_response(&[strng::new("*")], &[])).unwrap();
 		let model = &response["data"][0];
-		assert_eq!(model["id"], "gpt");
+		assert_eq!(model["id"], "openai/gpt");
 		assert_eq!(model["object"], "model");
 		assert_eq!(model["created"], 0);
 		assert_eq!(model["owned_by"], "openai");
