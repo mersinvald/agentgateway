@@ -470,14 +470,14 @@ async fn llm_codex_subscription_responses_contract_and_openai_isolation() {
 			let mut body = json!({
 				"model": if codex { "openai/gpt-codex" } else { "gpt-codex" },
 				"input": [
-					{"role": "developer", "content": [{"type": "input_text", "text": "Be helpful"}]},
+					{"role": "developer", "content": [{"type": "input_text", "text": "Be helpful", "prompt_cache_breakpoint": {"mode": "explicit"}}]},
 					{"role": "user", "content": [
 						{"type": "input_text", "text": "Describe this"},
 						{"type": "input_image", "image_url": "data:image/png;base64,aGVsbG8=", "detail": "auto"}
 					]},
 					{"type": "reasoning", "id": "rs_0", "summary": [], "encrypted_content": "opaque-history"},
 					{"type": "function_call", "call_id": "call_1", "name": "lookup", "arguments": "{}"},
-					{"type": "function_call_output", "call_id": "call_1", "output": "found"}
+					{"type": "function_call_output", "call_id": "call_1", "output": [{"type": "input_text", "text": "found", "prompt_cache_breakpoint": {"mode": "explicit"}}]}
 				],
 				"instructions": "Preserve these instructions", "store": true,
 				"max_output_tokens": 4096, "temperature": 0.5, "prompt_cache_retention": "24h", "safety_identifier": "user-test",
@@ -488,6 +488,7 @@ async fn llm_codex_subscription_responses_contract_and_openai_isolation() {
 				"text": {"verbosity": "low", "format": {"type": "json_schema", "name": "answer", "schema": {"type": "object"}}},
 				"stream_options": {"reasoning_summary_delivery": "sequential_cutoff"},
 				"prompt_cache_key": "session-test", "service_tier": "auto",
+				"prompt_cache_breakpoint": {"mode": "explicit"},
 				"metadata": {"max_output_tokens": "nested preserved"}, "future_field": {"keep": true}
 			});
 			if let Some(streaming) = streaming {
@@ -532,9 +533,18 @@ async fn llm_codex_subscription_responses_contract_and_openai_isolation() {
 			let actual: Value = serde_json::from_slice(&upstream.body).unwrap();
 			body["model"] = json!("gpt-codex");
 			if codex {
+				body["input"][0]["content"][0]
+					.as_object_mut()
+					.unwrap()
+					.remove("prompt_cache_breakpoint");
+				body["input"][4]["output"][0]
+					.as_object_mut()
+					.unwrap()
+					.remove("prompt_cache_breakpoint");
 				for key in [
 					"max_output_tokens",
 					"temperature",
+					"prompt_cache_breakpoint",
 					"prompt_cache_retention",
 					"safety_identifier",
 				] {
@@ -553,6 +563,7 @@ async fn llm_codex_subscription_responses_contract_and_openai_isolation() {
 				for key in [
 					"max_output_tokens",
 					"temperature",
+					"prompt_cache_breakpoint",
 					"prompt_cache_retention",
 					"safety_identifier",
 				] {

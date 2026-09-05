@@ -18,10 +18,29 @@ pub(super) fn normalize_request(bytes: &[u8]) -> Result<Vec<u8>, AIError> {
 	for key in [
 		"max_output_tokens",
 		"temperature",
+		"prompt_cache_breakpoint",
 		"prompt_cache_retention",
 		"safety_identifier",
 	] {
 		obj.remove(key);
+	}
+	// AI SDK emits this unsupported hint on message and tool-result content parts.
+	// Do not recursively strip keys from opaque history, tool schemas or user data.
+	if let Some(Value::Array(input)) = obj.get_mut("input") {
+		for item in input {
+			let field = match item.get("type").and_then(Value::as_str) {
+				Some("function_call_output" | "custom_tool_call_output") => "output",
+				Some("message") | None if item.get("role").is_some() => "content",
+				_ => continue,
+			};
+			if let Some(Value::Array(parts)) = item.get_mut(field) {
+				for part in parts {
+					if let Some(part) = part.as_object_mut() {
+						part.remove("prompt_cache_breakpoint");
+					}
+				}
+			}
+		}
 	}
 	obj.insert("store".into(), json!(false));
 	// Keep LLMRequest.streaming unchanged so unary callers still receive a JSON response.
@@ -132,6 +151,52 @@ mod tests {
 					"model": "gpt-test", "input": [{"role": "user", "content": [{"type": "input_text", "text": "hello"}]}],
 					"instructions": "", "store": false, "stream": true, "include": ["reasoning.encrypted_content"]
 				})
+			);
+			assert_eq!(normalize_request(&normalized).unwrap(), normalized);
+		}
+	}
+
+	#[test]
+	fn cache_breakpoints_are_removed_only_from_wire_content_parts() {
+		for hint in [Value::Null, json!({"mode": "explicit"})] {
+			let mut body = json!({
+				"model": "gpt-test", "instructions": "", "store": false, "stream": true,
+				"include": ["reasoning.encrypted_content"], "prompt_cache_key": "session-test",
+				"input": [
+					{"role": "system", "content": [{"type": "input_text", "text": "system"}]},
+					{"type": "message", "role": "developer", "content": [{"type": "input_text", "text": "developer"}]},
+					{"role": "user", "content": [
+						{"type": "input_text", "text": "hello"},
+						{"type": "input_image", "image_url": "https://example.com/image.png"},
+						{"type": "input_file", "file_id": "file_1"}
+					]},
+					{"type": "function_call_output", "call_id": "call_1", "output": [{"type": "input_text", "text": "found"}]},
+					{"type": "custom_tool_call_output", "call_id": "call_2", "output": [{"type": "input_text", "text": "done"}]},
+					{"type": "message", "role": "assistant", "id": "msg_1", "phase": "commentary", "content": [{"type": "output_text", "text": "working"}]},
+					{"role": "user", "content": "prompt_cache_breakpoint"},
+					{"type": "reasoning", "id": "rs_1", "encrypted_content": "opaque", "summary": [], "future": {"prompt_cache_breakpoint": "keep"}},
+					{"type": "function_call", "call_id": "call_1", "arguments": "{\"prompt_cache_breakpoint\":true}"},
+					{"type": "function_call_output", "call_id": "call_3", "output": "{\"prompt_cache_breakpoint\":true}"}
+				],
+				"metadata": {"prompt_cache_breakpoint": "keep"},
+				"tools": [{"type": "function", "name": "lookup", "parameters": {"type": "object", "properties": {"prompt_cache_breakpoint": {"type": "boolean"}}}}]
+			});
+			let expected = body.clone();
+			body["prompt_cache_breakpoint"] = hint.clone();
+			for item in body["input"].as_array_mut().unwrap().iter_mut().take(6) {
+				let field = if item.get("role").is_some() {
+					"content"
+				} else {
+					"output"
+				};
+				for part in item[field].as_array_mut().unwrap() {
+					part["prompt_cache_breakpoint"] = hint.clone();
+				}
+			}
+			let normalized = normalize_request(&serde_json::to_vec(&body).unwrap()).unwrap();
+			assert_eq!(
+				serde_json::from_slice::<Value>(&normalized).unwrap(),
+				expected
 			);
 			assert_eq!(normalize_request(&normalized).unwrap(), normalized);
 		}
