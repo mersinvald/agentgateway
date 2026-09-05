@@ -858,7 +858,7 @@ fn rewrite_request_model(
 }
 
 pub(crate) async fn normalize_codex_model(req: &mut Request) -> RouterResult<()> {
-	let requested = requested_model(req).await?;
+	let mut requested = requested_model(req).await?;
 	if requested.model == CODEX_SUBSCRIPTION_AUTH_MODEL {
 		return Ok(());
 	}
@@ -884,6 +884,10 @@ pub(crate) async fn normalize_codex_model(req: &mut Request) -> RouterResult<()>
 		.0
 		.entry("agentgateway_user_model".to_string())
 		.or_insert_with(|| Value::String(requested.model.clone()));
+	if let RequestedModelLocation::Body(Value::Object(body)) = &mut requested.location {
+		// The Codex subscription backend rejects this OpenAI Responses parameter.
+		body.remove("max_output_tokens");
+	}
 	rewrite_request_model(req, requested.location, slug)
 }
 
@@ -1108,6 +1112,72 @@ mod tests {
 	use super::*;
 	use crate::transport::BufferLimit;
 	use crate::types::agent::RouteBackendTarget;
+
+	#[tokio::test]
+	async fn normalize_codex_model_removes_only_output_limit() {
+		for limit in [None, Some(Value::Null), Some(serde_json::json!(4096))] {
+			let mut body = serde_json::json!({
+				"model": "openai/gpt-test",
+				"input": "hello",
+				"instructions": "Be concise",
+				"stream": false,
+				"store": true,
+				"reasoning": {"effort": "low"},
+				"metadata": {"max_output_tokens": "preserve nested fields"}
+			});
+			let mut expected = body.clone();
+			expected["model"] = serde_json::json!("gpt-test");
+			if let Some(limit) = limit {
+				body["max_output_tokens"] = limit;
+			}
+			let bytes = Bytes::from(serde_json::to_vec(&body).unwrap());
+			let mut req = ::http::Request::builder()
+				.method(::http::Method::POST)
+				.uri("/v1/responses")
+				.header(::http::header::CONTENT_LENGTH, bytes.len())
+				.body(http::Body::from(bytes.clone()))
+				.unwrap();
+			req
+				.extensions_mut()
+				.insert(cel::BufferedBody::complete(bytes));
+
+			normalize_codex_model(&mut req).await.unwrap();
+
+			assert!(!req.headers().contains_key(::http::header::CONTENT_LENGTH));
+			assert!(req.extensions().get::<cel::BufferedBody>().is_none());
+			assert_eq!(
+				req.extensions().get::<TransformationMetadata>().unwrap().0["agentgateway_user_model"],
+				"openai/gpt-test"
+			);
+			let bytes = http::read_body_with_limit(req.into_body(), 4096)
+				.await
+				.unwrap();
+			assert_eq!(serde_json::from_slice::<Value>(&bytes).unwrap(), expected);
+		}
+	}
+
+	#[tokio::test]
+	async fn generic_model_rewrite_preserves_output_limit() {
+		let body = serde_json::json!({
+			"model": "virtual-model",
+			"input": "hello",
+			"max_output_tokens": 4096
+		});
+		let mut req = ::http::Request::builder()
+			.method(::http::Method::POST)
+			.uri("/v1/responses")
+			.body(http::Body::from(body.to_string()))
+			.unwrap();
+		let requested = requested_model(&mut req).await.unwrap();
+		rewrite_request_model(&mut req, requested.location, "gpt-test").unwrap();
+
+		let mut expected = body;
+		expected["model"] = serde_json::json!("gpt-test");
+		let bytes = http::read_body_with_limit(req.into_body(), 4096)
+			.await
+			.unwrap();
+		assert_eq!(serde_json::from_slice::<Value>(&bytes).unwrap(), expected);
+	}
 
 	#[derive(Debug)]
 	struct TestCodexSubscriptionAuth(CodexSubscriptionAuthState);

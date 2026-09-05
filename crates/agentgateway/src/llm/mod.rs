@@ -36,6 +36,7 @@ pub use agent_llm::{azure, bedrock, vertex};
 pub mod catalog;
 pub mod codex_catalog;
 pub mod codex_oauth;
+mod codex_responses;
 pub mod policy;
 
 use policy::streaming_guardrails::GuardedSseBody;
@@ -2115,6 +2116,13 @@ impl AIProvider {
 			Some(p) => p.apply_final_transformations(rendered.body, log)?,
 			None => rendered.body,
 		};
+		let body = if matches!(self, AIProvider::CodexSubscription(_))
+			&& provider_format == custom::ProviderFormat::Responses
+		{
+			codex_responses::normalize_request(&body)?
+		} else {
+			body
+		};
 		parts.headers.remove(header::CONTENT_LENGTH);
 		let req = Request::from_parts(parts, Body::from(body));
 		Ok(RequestResult::Success {
@@ -2235,7 +2243,13 @@ impl AIProvider {
 		}
 		let model_catalog = model_catalog.map(Arc::as_ref);
 
-		let buffered = Self::buffer_response(resp).await?;
+		let mut buffered = Self::buffer_response(resp).await?;
+		if matches!(self, AIProvider::CodexSubscription(_))
+			&& req.input_format == InputFormat::Responses
+			&& buffered.parts.status.is_success()
+		{
+			codex_responses::normalize_unary_response(&mut buffered)?;
+		}
 
 		match req.input_format {
 			InputFormat::CountTokens => {

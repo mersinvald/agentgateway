@@ -375,6 +375,195 @@ llm:
 }
 
 #[tokio::test]
+async fn llm_codex_subscription_responses_contract_and_openai_isolation() {
+	for codex in [true, false] {
+		for streaming in [None, Some(false), Some(true)] {
+			let mock = MockServer::start().await;
+			Mock::given(wiremock::matchers::method("GET"))
+				.and(wiremock::matchers::path("/backend-api/codex/models"))
+				.respond_with(ResponseTemplate::new(200).set_body_json(json!({
+					"models": [{"slug": "gpt-codex", "visibility": "list", "supported_in_api": true}]
+				})))
+				.mount(&mock)
+				.await;
+			let mut terminal: Value =
+				serde_json::from_slice(llm_body!("response/responses/basic.json")).unwrap();
+			terminal["output"].as_array_mut().unwrap().push(json!({
+				"type": "reasoning", "id": "rs_1", "summary": [], "encrypted_content": "opaque-reasoning"
+			}));
+			terminal["output"].as_array_mut().unwrap().push(json!({
+				"type": "function_call", "id": "fc_2", "call_id": "call_2", "name": "lookup", "arguments": "{}", "status": "completed"
+			}));
+			let done_events = terminal["output"]
+				.as_array()
+				.unwrap()
+				.iter()
+				.enumerate()
+				.map(|(index, item)| {
+					format!(
+						"event: response.output_item.done\r\ndata: {}\r\n\r\n",
+						json!({
+							"type": "response.output_item.done", "output_index": index, "item": item
+						})
+					)
+				})
+				.collect::<String>();
+			let mut wire_terminal = terminal.clone();
+			// Real Codex sends full items before a terminal response with empty or missing output.
+			if codex {
+				if streaming.is_none() {
+					wire_terminal.as_object_mut().unwrap().remove("output");
+				} else {
+					wire_terminal["output"] = json!([]);
+				}
+			}
+			let sse = format!(
+				"event: response.reasoning_summary_text.delta\r\ndata: {{\"type\":\"response.reasoning_summary_text.delta\",\"delta\":\"Thinking\"}}\r\n\r\nevent: response.function_call_arguments.delta\r\ndata: {{\"type\":\"response.function_call_arguments.delta\",\"item_id\":\"fc_2\",\"delta\":\"{{}}\"}}\r\n\r\n{done_events}event: response.completed\r\ndata: {}\r\n\r\n",
+				json!({
+					"type": "response.completed", "sequence_number": 1, "response": wire_terminal
+				})
+			);
+			let wire_body = if codex || streaming == Some(true) {
+				sse.clone()
+			} else {
+				terminal.to_string()
+			};
+			let content_type = if codex || streaming == Some(true) {
+				"text/event-stream"
+			} else {
+				"application/json"
+			};
+			Mock::given(wiremock::matchers::method("POST"))
+				.respond_with(ResponseTemplate::new(200).set_body_raw(wire_body, content_type))
+				.mount(&mock)
+				.await;
+			let ai = if codex {
+				AIProvider::CodexSubscription(codex_subscription::Provider {
+					refresh_interval: Duration::from_secs(60),
+					stale_while_revalidate: Duration::from_secs(60),
+					allow_models: vec!["*".into()],
+					deny_models: vec![],
+				})
+			} else {
+				AIProvider::OpenAI(openai::Provider {
+					model: None,
+					moderation: None,
+				})
+			};
+			let mut provider = llm_named_provider(&mock, ai, false);
+			provider.path_prefix = Some(
+				if codex {
+					codex_subscription::DEFAULT_BASE_PATH
+				} else {
+					"/v1"
+				}
+				.into(),
+			);
+			provider.policies = Some(
+				serde_json::from_value(json!({"ai": {
+					"routes": {"/v1/responses": "responses"},
+					"overrides": {"max_output_tokens": 8192}
+				}}))
+				.unwrap(),
+			);
+			let (mock, _bind, io) = setup_llm_named_provider_mock(mock, provider, "{}");
+			let mut body = json!({
+				"model": if codex { "openai/gpt-codex" } else { "gpt-codex" },
+				"input": [
+					{"role": "developer", "content": [{"type": "input_text", "text": "Be helpful"}]},
+					{"role": "user", "content": [
+						{"type": "input_text", "text": "Describe this"},
+						{"type": "input_image", "image_url": "data:image/png;base64,aGVsbG8=", "detail": "auto"}
+					]},
+					{"type": "reasoning", "id": "rs_0", "summary": [], "encrypted_content": "opaque-history"},
+					{"type": "function_call", "call_id": "call_1", "name": "lookup", "arguments": "{}"},
+					{"type": "function_call_output", "call_id": "call_1", "output": "found"}
+				],
+				"instructions": "Preserve these instructions", "store": true,
+				"max_output_tokens": 4096, "temperature": 0.5, "prompt_cache_retention": "24h", "safety_identifier": "user-test",
+				"reasoning": {"effort": "high", "summary": "auto"},
+				"tools": [{"type": "function", "name": "lookup", "parameters": {"type": "object", "properties": {}}, "strict": false}],
+				"tool_choice": "auto", "parallel_tool_calls": true,
+				"include": ["reasoning.encrypted_content", "web_search_call.action.sources"],
+				"text": {"verbosity": "low", "format": {"type": "json_schema", "name": "answer", "schema": {"type": "object"}}},
+				"stream_options": {"reasoning_summary_delivery": "sequential_cutoff"},
+				"prompt_cache_key": "session-test", "service_tier": "auto",
+				"metadata": {"max_output_tokens": "nested preserved"}, "future_field": {"keep": true}
+			});
+			if let Some(streaming) = streaming {
+				body["stream"] = json!(streaming);
+			}
+			let response = RequestBuilder::new(Method::POST, "http://lo/v1/responses")
+				.body(Body::from(body.to_string()))
+				.send(io)
+				.await
+				.unwrap();
+			let status = response.status();
+			let response_type = response.headers()["content-type"]
+				.to_str()
+				.unwrap()
+				.to_owned();
+			let received = read_body_raw(response.into_body()).await;
+			assert_eq!(
+				status,
+				StatusCode::OK,
+				"{}",
+				String::from_utf8_lossy(&received)
+			);
+			if streaming == Some(true) {
+				assert!(response_type.starts_with("text/event-stream"));
+				assert_eq!(received.as_ref(), sse.as_bytes());
+			} else {
+				assert!(response_type.starts_with("application/json"));
+				let response: Value = serde_json::from_slice(&received).unwrap();
+				assert_eq!(response["output"], terminal["output"]);
+				assert_eq!(response["usage"], terminal["usage"]);
+			}
+			let requests = mock.received_requests().await.unwrap();
+			let upstream = requests.iter().find(|r| r.method == Method::POST).unwrap();
+			assert_eq!(
+				upstream.url.path(),
+				if codex {
+					"/backend-api/codex/responses"
+				} else {
+					"/v1/responses"
+				}
+			);
+			let actual: Value = serde_json::from_slice(&upstream.body).unwrap();
+			body["model"] = json!("gpt-codex");
+			if codex {
+				for key in [
+					"max_output_tokens",
+					"temperature",
+					"prompt_cache_retention",
+					"safety_identifier",
+				] {
+					body.as_object_mut().unwrap().remove(key);
+				}
+				body["store"] = json!(false);
+				body["stream"] = json!(true);
+			} else {
+				body["max_output_tokens"] = json!(8192);
+			}
+			// Compare every supplied field, including opaque history, unknown fields and nested limits.
+			for (key, value) in body.as_object().unwrap() {
+				assert_eq!(&actual[key], value, "{key}, codex={codex}");
+			}
+			if codex {
+				for key in [
+					"max_output_tokens",
+					"temperature",
+					"prompt_cache_retention",
+					"safety_identifier",
+				] {
+					assert!(actual.get(key).is_none(), "{key}");
+				}
+			}
+		}
+	}
+}
+
+#[tokio::test]
 async fn llm_codex_subscription_models_uses_catalog_cache() {
 	let mock = MockServer::start().await;
 	Mock::given(wiremock::matchers::method("GET"))
