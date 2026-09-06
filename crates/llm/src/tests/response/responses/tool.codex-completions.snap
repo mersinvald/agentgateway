@@ -1,0 +1,57 @@
+---
+source: crates/llm/src/conversion/responses/from_completions.rs
+expression: "json!({\"response\": json, \"parsed\":\n    translated.to_llm_response(LogContentFields::default()), \"stream\":\n    with_usage})"
+---
+{
+  "response": {
+    "model": "gpt-4.1-mini",
+    "service_tier": "default",
+    "usage": {
+      "prompt_tokens": 30,
+      "completion_tokens": 5,
+      "total_tokens": 35,
+      "completion_tokens_details": {
+        "reasoning_tokens": 0
+      },
+      "prompt_tokens_details": {
+        "cached_tokens": 4,
+        "cache_write_tokens": 6
+      }
+    },
+    "choices": [
+      {
+        "message": {
+          "content": "I will check that.",
+          "role": "assistant",
+          "tool_calls": [
+            {
+              "id": "call_weather",
+              "type": "function",
+              "function": {
+                "name": "get_weather",
+                "arguments": "{\"location\":\"San Francisco\"}"
+              }
+            }
+          ]
+        },
+        "index": 0,
+        "finish_reason": "tool_calls",
+        "logprobs": null
+      }
+    ],
+    "id": "resp_tool",
+    "object": "chat.completion",
+    "created": 123
+  },
+  "parsed": {
+    "input_tokens": 30,
+    "output_tokens": 5,
+    "total_tokens": 35,
+    "reasoning_tokens": 0,
+    "cache_creation_input_tokens": 6,
+    "cached_input_tokens": 4,
+    "service_tier": "default",
+    "provider_model": "gpt-4.1-mini"
+  },
+  "stream": "data: {\"id\":\"resp_tool\",\"object\":\"chat.completion.chunk\",\"model\":\"gpt-4.1-mini\",\"created\":123,\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"\"},\"finish_reason\":null,\"logprobs\":null}],\"usage\":null}\n\ndata: {\"id\":\"resp_tool\",\"object\":\"chat.completion.chunk\",\"model\":\"gpt-4.1-mini\",\"created\":123,\"choices\":[{\"index\":0,\"delta\":{\"content\":\"I will check that.\"},\"finish_reason\":null,\"logprobs\":null}],\"usage\":null}\n\ndata: {\"id\":\"resp_tool\",\"object\":\"chat.completion.chunk\",\"model\":\"gpt-4.1-mini\",\"created\":123,\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_weather\",\"type\":\"function\",\"function\":{\"name\":\"get_weather\",\"arguments\":\"\"}}]},\"finish_reason\":null,\"logprobs\":null}],\"usage\":null}\n\ndata: {\"id\":\"resp_tool\",\"object\":\"chat.completion.chunk\",\"model\":\"gpt-4.1-mini\",\"created\":123,\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"{\\\"location\\\":\\\"San Francisco\\\"}\"}}]},\"finish_reason\":null,\"logprobs\":null}],\"usage\":null}\n\ndata: {\"id\":\"resp_tool\",\"object\":\"chat.completion.chunk\",\"model\":\"gpt-4.1-mini\",\"created\":123,\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"tool_calls\",\"logprobs\":null}],\"usage\":null}\n\ndata: {\"id\":\"resp_tool\",\"object\":\"chat.completion.chunk\",\"model\":\"gpt-4.1-mini\",\"created\":123,\"choices\":[],\"usage\":{\"prompt_tokens\":30,\"completion_tokens\":5,\"total_tokens\":35,\"prompt_tokens_details\":{\"cached_tokens\":4,\"cache_write_tokens\":6},\"completion_tokens_details\":{\"reasoning_tokens\":0}}}\n\ndata: [DONE]\n\n"
+}

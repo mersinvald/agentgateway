@@ -8,6 +8,8 @@ use serde::Deserialize;
 use crate::types::detect;
 use crate::{OutputMessage, OutputMessagePart, StreamingUsageGuard, parse, types};
 
+pub mod from_completions;
+
 #[allow(clippy::large_enum_variant)] // The large variant is used 99% of the time so just always use it.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(untagged)]

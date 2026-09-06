@@ -933,6 +933,7 @@ async fn streaming_response_is_forwarded_byte_for_byte() {
 		.stream(
 			::http::Response::new(Body::from(sse)),
 			crate::llm::ChatStreamContext {
+				include_usage: false,
 				buffer_limit: 1024 * 1024,
 				logger: Default::default(),
 				model: "gemini-2.5-flash".to_string(),

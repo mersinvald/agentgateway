@@ -137,6 +137,7 @@ mod requests {
 
 	const COMPLETION_REQUESTS: &[(&str, &[&str])] = &[
 		("basic", &[ANTHROPIC, BEDROCK, VERTEX_GEMINI]),
+		("codex/full", &[RESPONSES]),
 		("prompt-cache-breakpoint", &[ANTHROPIC, BEDROCK]),
 		("full", &[ANTHROPIC, BEDROCK]),
 		("tool-call", &[ANTHROPIC, BEDROCK, VERTEX_GEMINI]),
@@ -229,6 +230,9 @@ mod requests {
 			let path = format!("requests/completions/{name}.json");
 			for provider in *providers {
 				match *provider {
+					RESPONSES => test_request(RESPONSES, &path, |i| {
+						conversion::responses::from_completions::translate(i)
+					}),
 					ANTHROPIC => test_request(ANTHROPIC, &path, |i| {
 						conversion::messages::from_completions::translate(i)
 					}),

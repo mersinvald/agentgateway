@@ -262,6 +262,9 @@ pub struct LLMRequest {
 
 #[derive(Debug, Clone)]
 pub enum ProviderState {
+	CodexCompletions {
+		include_usage: bool,
+	},
 	Bedrock {
 		tool_names: Arc<conversion::bedrock::BedrockToolNameMap>,
 	},

@@ -1,0 +1,314 @@
+---
+source: crates/llm/src/golden_tests.rs
+description: src/tests/requests/completions/codex/full.json
+info:
+  model: gpt-5.6-luna
+  messages:
+    - role: system
+      content: Be helpful.
+    - role: developer
+      content:
+        - type: text
+          text: Use tools when needed.
+    - role: user
+      content:
+        - type: text
+          text: Describe this.
+        - type: image_url
+          image_url:
+            url: "https://example.com/image.png"
+            detail: high
+    - role: assistant
+      content: Checking.
+      tool_calls:
+        - id: call_1
+          type: function
+          function:
+            name: lookup
+            arguments: "{\"query\":\"image\"}"
+    - role: tool
+      tool_call_id: call_1
+      content: Found a cat.
+    - role: assistant
+      content: ~
+      tool_calls:
+        - id: call_2
+          type: function
+          function:
+            name: lookup
+            arguments: "{}"
+    - role: tool
+      tool_call_id: call_2
+      content:
+        - type: text
+          text: Confirmed.
+    - role: assistant
+      content: ~
+      refusal: Cannot help with that request.
+    - role: assistant
+      content:
+        - type: text
+          text: "For that alternative: "
+        - type: refusal
+          refusal: I cannot provide those details.
+    - role: user
+      content: Hello
+  temperature: 0.7
+  max_tokens: 256
+  max_completion_tokens: 512
+  n: 1
+  logprobs: false
+  top_logprobs: ~
+  logit_bias: {}
+  frequency_penalty: 0
+  presence_penalty: 0
+  top_p: 1
+  stop: ~
+  seed: ~
+  store: false
+  stream: true
+  stream_options:
+    include_usage: true
+  tools:
+    - type: function
+      function:
+        name: lookup
+        description: Look up information
+        parameters:
+          type: object
+          properties:
+            query:
+              type: string
+        strict: false
+  tool_choice:
+    type: function
+    function:
+      name: lookup
+  parallel_tool_calls: true
+  reasoning_effort: high
+  response_format:
+    type: json_schema
+    json_schema:
+      name: answer
+      description: An answer
+      schema:
+        type: object
+        properties:
+          answer:
+            type: string
+        required:
+          - answer
+        additionalProperties: false
+      strict: true
+  metadata:
+    session: test
+  prompt_cache_key: test-session
+  service_tier: auto
+---
+{
+  "request": {
+    "model": "gpt-5.6-luna",
+    "input": [
+      {
+        "role": "system",
+        "content": [
+          {
+            "type": "input_text",
+            "text": "Be helpful."
+          }
+        ]
+      },
+      {
+        "role": "developer",
+        "content": [
+          {
+            "type": "input_text",
+            "text": "Use tools when needed."
+          }
+        ]
+      },
+      {
+        "role": "user",
+        "content": [
+          {
+            "type": "input_text",
+            "text": "Describe this."
+          },
+          {
+            "type": "input_image",
+            "image_url": "https://example.com/image.png",
+            "detail": "high"
+          }
+        ]
+      },
+      {
+        "role": "assistant",
+        "content": [
+          {
+            "type": "output_text",
+            "text": "Checking."
+          }
+        ]
+      },
+      {
+        "type": "function_call",
+        "call_id": "call_1",
+        "name": "lookup",
+        "arguments": "{\"query\":\"image\"}"
+      },
+      {
+        "type": "function_call_output",
+        "call_id": "call_1",
+        "output": "Found a cat."
+      },
+      {
+        "type": "function_call",
+        "call_id": "call_2",
+        "name": "lookup",
+        "arguments": "{}"
+      },
+      {
+        "type": "function_call_output",
+        "call_id": "call_2",
+        "output": "Confirmed."
+      },
+      {
+        "role": "assistant",
+        "content": [
+          {
+            "type": "refusal",
+            "refusal": "Cannot help with that request."
+          }
+        ]
+      },
+      {
+        "role": "assistant",
+        "content": [
+          {
+            "type": "output_text",
+            "text": "For that alternative: "
+          },
+          {
+            "type": "refusal",
+            "refusal": "I cannot provide those details."
+          }
+        ]
+      },
+      {
+        "role": "user",
+        "content": [
+          {
+            "type": "input_text",
+            "text": "Hello"
+          }
+        ]
+      }
+    ],
+    "stream": true,
+    "tools": [
+      {
+        "name": "lookup",
+        "description": "Look up information",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "query": {
+              "type": "string"
+            }
+          }
+        },
+        "strict": false,
+        "type": "function"
+      }
+    ],
+    "tool_choice": {
+      "type": "function",
+      "name": "lookup"
+    },
+    "parallel_tool_calls": true,
+    "metadata": {
+      "session": "test"
+    },
+    "service_tier": "auto",
+    "prompt_cache_key": "test-session",
+    "reasoning": {
+      "effort": "high"
+    },
+    "text": {
+      "format": {
+        "name": "answer",
+        "description": "An answer",
+        "schema": {
+          "type": "object",
+          "properties": {
+            "answer": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "answer"
+          ],
+          "additionalProperties": false
+        },
+        "strict": true,
+        "type": "json_schema"
+      }
+    }
+  },
+  "parsed": {
+    "input_format": "Completions",
+    "cache_convention": "InputIncludesCache",
+    "request_model": "gpt-5.6-luna",
+    "provider": "responses",
+    "streaming": true,
+    "params": {
+      "temperature": 0.699999988079071,
+      "top_p": 1.0,
+      "frequency_penalty": 0.0,
+      "presence_penalty": 0.0,
+      "max_tokens": 512
+    },
+    "prompt": [
+      {
+        "role": "system",
+        "content": "Be helpful."
+      },
+      {
+        "role": "developer",
+        "content": "Use tools when needed."
+      },
+      {
+        "role": "user",
+        "content": "Describe this."
+      },
+      {
+        "role": "assistant",
+        "content": "Checking."
+      },
+      {
+        "role": "tool",
+        "content": "Found a cat."
+      },
+      {
+        "role": "assistant",
+        "content": ""
+      },
+      {
+        "role": "tool",
+        "content": "Confirmed."
+      },
+      {
+        "role": "assistant",
+        "content": ""
+      },
+      {
+        "role": "assistant",
+        "content": "For that alternative: "
+      },
+      {
+        "role": "user",
+        "content": "Hello"
+      }
+    ]
+  }
+}

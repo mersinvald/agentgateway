@@ -1,0 +1,50 @@
+---
+source: crates/llm/src/conversion/responses/from_completions.rs
+expression: "json!({\"response\": json, \"parsed\":\n    translated.to_llm_response(LogContentFields::default()), \"stream\":\n    with_usage})"
+---
+{
+  "response": {
+    "model": "qwen3-8b",
+    "service_tier": "default",
+    "usage": {
+      "prompt_tokens": 18,
+      "completion_tokens": 5,
+      "total_tokens": 23,
+      "completion_tokens_details": {
+        "reasoning_tokens": 8,
+        "tool_output_tokens": 0,
+        "output_tokens_per_turn": [],
+        "tool_output_tokens_per_turn": []
+      },
+      "prompt_tokens_details": {
+        "cached_tokens": 0,
+        "input_tokens_per_turn": [],
+        "cached_tokens_per_turn": []
+      }
+    },
+    "choices": [
+      {
+        "message": {
+          "content": "Hello! How can I assist you today?",
+          "role": "assistant"
+        },
+        "index": 0,
+        "finish_reason": "stop",
+        "logprobs": null
+      }
+    ],
+    "id": "resp_0fd43e1b46691ead0069a89a2144808199a06ce29faf5798da",
+    "object": "chat.completion",
+    "created": 1772657185
+  },
+  "parsed": {
+    "input_tokens": 18,
+    "output_tokens": 5,
+    "total_tokens": 23,
+    "reasoning_tokens": 8,
+    "cached_input_tokens": 0,
+    "service_tier": "default",
+    "provider_model": "qwen3-8b"
+  },
+  "stream": "data: {\"id\":\"resp_0fd43e1b46691ead0069a89a2144808199a06ce29faf5798da\",\"object\":\"chat.completion.chunk\",\"model\":\"qwen3-8b\",\"created\":1772657185,\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"\"},\"finish_reason\":null,\"logprobs\":null}],\"usage\":null}\n\ndata: {\"id\":\"resp_0fd43e1b46691ead0069a89a2144808199a06ce29faf5798da\",\"object\":\"chat.completion.chunk\",\"model\":\"qwen3-8b\",\"created\":1772657185,\"choices\":[{\"index\":0,\"delta\":{\"content\":\"Hello! How can I assist you today?\"},\"finish_reason\":null,\"logprobs\":null}],\"usage\":null}\n\ndata: {\"id\":\"resp_0fd43e1b46691ead0069a89a2144808199a06ce29faf5798da\",\"object\":\"chat.completion.chunk\",\"model\":\"qwen3-8b\",\"created\":1772657185,\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\",\"logprobs\":null}],\"usage\":null}\n\ndata: {\"id\":\"resp_0fd43e1b46691ead0069a89a2144808199a06ce29faf5798da\",\"object\":\"chat.completion.chunk\",\"model\":\"qwen3-8b\",\"created\":1772657185,\"choices\":[],\"usage\":{\"prompt_tokens\":18,\"completion_tokens\":5,\"total_tokens\":23,\"prompt_tokens_details\":{\"cached_tokens\":0,\"input_tokens_per_turn\":[],\"cached_tokens_per_turn\":[]},\"completion_tokens_details\":{\"reasoning_tokens\":8,\"tool_output_tokens\":0,\"output_tokens_per_turn\":[],\"tool_output_tokens_per_turn\":[]}}}\n\ndata: [DONE]\n\n"
+}

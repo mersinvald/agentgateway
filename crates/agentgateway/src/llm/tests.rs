@@ -2305,6 +2305,60 @@ async fn process_response_routes_streaming_error_to_buffered_path() {
 }
 
 #[tokio::test]
+async fn codex_chat_unary_failures_are_json_including_metadata_and_buffer_limit() {
+	use crate::proxy::httpproxy::PolicyClient;
+	use crate::test_helpers::proxymock::setup_proxy_test;
+	let provider = AIProvider::CodexSubscription(codex_subscription::Provider {
+		refresh_interval: std::time::Duration::from_secs(60),
+		stale_while_revalidate: std::time::Duration::from_secs(60),
+		allow_models: vec!["*".into()],
+		deny_models: vec![],
+	});
+	for limit in [16, 65536] {
+		for input_format in [InputFormat::Completions, InputFormat::Responses] {
+			let mut req = llm_request_with_tokens(None);
+			req.input_format = input_format;
+			req.streaming = false;
+			let mut resp = Response::new(Body::from(
+				"data: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\",\"output\":[]}}\n\n",
+			));
+			resp.extensions_mut().insert(http::BufferLimit(limit));
+			let result = provider
+				.process_response(
+					PolicyClient::new(setup_proxy_test("{}").unwrap().pi),
+					req,
+					LLMResponsePolicies::default(),
+					None,
+					AsyncLog::default(),
+					llm::LogContentFields::default(),
+					None,
+					resp,
+				)
+				.await;
+			if input_format == InputFormat::Responses {
+				assert!(result.is_err());
+				continue;
+			}
+			let result = result.expect("Codex Chat failures must return JSON responses");
+			assert_eq!(result.status(), ::http::StatusCode::BAD_GATEWAY);
+			assert_eq!(
+				result.headers()[::http::header::CONTENT_TYPE],
+				"application/json"
+			);
+			let body: Value =
+				serde_json::from_slice(&result.collect().await.unwrap().to_bytes()).unwrap();
+			assert_eq!(body["error"]["type"], "api_error");
+			assert!(
+				body["error"]["message"]
+					.as_str()
+					.is_some_and(|s| !s.is_empty())
+			);
+			assert!(body.get("choices").is_none());
+		}
+	}
+}
+
+#[tokio::test]
 async fn upstream_encoding_is_applied_after_messages_response_translation() {
 	use crate::proxy::httpproxy::PolicyClient;
 	use crate::test_helpers::proxymock::setup_proxy_test;

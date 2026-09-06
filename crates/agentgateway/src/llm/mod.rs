@@ -299,6 +299,7 @@ struct ChatResponseContext<'a> {
 
 // Context provider to each response translation (streaming)
 struct ChatStreamContext {
+	include_usage: bool,
 	buffer_limit: usize,
 	logger: agent_llm::StreamingUsageGuard,
 	model: String,
@@ -497,6 +498,19 @@ impl ChatTranslation {
 		req: types::ChatRequest,
 		ctx: &ChatRequestContext<'_>,
 	) -> Result<RenderedChatRequest, AIError> {
+		if self.output == ChatFormat::OpenAIResponses
+			&& let types::ChatRequest::Completions(ref completions) = req
+		{
+			return Ok(RenderedChatRequest {
+				body: conversion::responses::from_completions::translate(completions)?,
+				provider_state: Some(ProviderState::CodexCompletions {
+					include_usage: completions
+						.stream_options
+						.as_ref()
+						.is_some_and(|options| options.include_usage),
+				}),
+			});
+		}
 		let body = match self.output {
 			ChatFormat::OpenAICompletions => render_openai_completions(req, ctx),
 			ChatFormat::OpenAIResponses => render_openai_responses(req, ctx),
@@ -540,6 +554,9 @@ impl ChatTranslation {
 			},
 			ChatFormat::OpenAIResponses => match self.input {
 				InputFormat::Responses => AIProvider::parse_response::<types::responses::Response>(bytes),
+				InputFormat::Completions => {
+					conversion::responses::from_completions::translate_response(bytes)
+				},
 				InputFormat::Messages => conversion::responses::from_messages::translate_response(bytes),
 				_ => Err(AIError::UnsupportedConversion(strng::format!(
 					"from {:?} to {:?}",
@@ -620,6 +637,15 @@ impl ChatTranslation {
 			},
 
 			ChatFormat::OpenAIResponses => match self.input {
+				InputFormat::Completions => resp.map(|b| {
+					conversion::responses::from_completions::translate_stream(
+						b,
+						ctx.buffer_limit,
+						ctx.logger,
+						ctx.log_content,
+						ctx.include_usage,
+					)
+				}),
 				InputFormat::Responses => resp.map(|b| {
 					conversion::responses::passthrough_stream(
 						b,
@@ -765,7 +791,7 @@ impl ChatTranslation {
 
 			ChatFormat::OpenAIResponses => match format {
 				ChatErrorFormat::OpenAI => match self.input {
-					InputFormat::Responses => Ok(bytes.clone()),
+					InputFormat::Responses | InputFormat::Completions => Ok(bytes.clone()),
 					InputFormat::Messages => {
 						conversion::responses::from_messages::translate_error(bytes, status)
 					},
@@ -962,7 +988,7 @@ impl AIProvider {
 				vec![ChatFormat::OpenAIResponses, ChatFormat::OpenAICompletions]
 			},
 			AIProvider::CodexSubscription(_) => {
-				vec![ChatFormat::OpenAIResponses, ChatFormat::OpenAICompletions]
+				vec![ChatFormat::OpenAIResponses]
 			},
 
 			AIProvider::Copilot(_) => {
@@ -1030,6 +1056,15 @@ impl AIProvider {
 		request_model: Option<&str>,
 		catalog: agent_llm::model_catalog::Catalog<'_>,
 	) -> Result<&'static ChatTranslation, AIError> {
+		// The subscription endpoint only speaks Responses. Keep this facade scoped to
+		// Codex rather than changing route selection for ordinary OpenAI/custom providers.
+		if matches!(self, AIProvider::CodexSubscription(_)) && input_format == InputFormat::Completions
+		{
+			return Ok(&ChatTranslation {
+				input: InputFormat::Completions,
+				output: ChatFormat::OpenAIResponses,
+			});
+		}
 		let supported = self.supported_chat_formats(request_model, catalog);
 		CHAT_TRANSLATIONS
 			.iter()
@@ -1567,45 +1602,61 @@ impl AIProvider {
 		log: &mut Option<&mut RequestLog>,
 		catalog: agent_llm::model_catalog::Catalog<'_>,
 	) -> Result<RequestResult, AIError> {
-		let (parts, mut req) = self
-			.read_body_and_default_model::<types::completions::Request>(policies, req, log)
-			.await?;
-		self.apply_model_alias(policies, &mut req);
+		let result = async {
+			let (parts, mut req) = self
+				.read_body_and_default_model::<types::completions::Request>(policies, req, log)
+				.await?;
+			self.apply_model_alias(policies, &mut req);
 
-		// If a user doesn't request usage, we will not get token information which we need
-		// We always set it.
-		// TODO?: this may impact the user, if they make assumptions about the stream NOT including usage.
-		// Notably, this adds a final SSE event.
-		// We could actually go remove that on the response, but it would mean we cannot do passthrough-parsing,
-		// so unless we have a compelling use case for it, for now we keep it.
-		if req.stream.unwrap_or_default() && req.stream_options.is_none() {
-			req.stream_options = Some(types::completions::StreamOptions {
-				include_usage: true,
-				rest: Default::default(),
-			});
+			// If a user doesn't request usage, we will not get token information which we need
+			// We always set it.
+			// TODO?: this may impact the user, if they make assumptions about the stream NOT including usage.
+			// Notably, this adds a final SSE event.
+			// We could actually go remove that on the response, but it would mean we cannot do passthrough-parsing,
+			// so unless we have a compelling use case for it, for now we keep it.
+			if req.stream.unwrap_or_default()
+				&& req.stream_options.is_none()
+				&& !matches!(self, AIProvider::CodexSubscription(_))
+			{
+				req.stream_options = Some(types::completions::StreamOptions {
+					include_usage: true,
+					rest: Default::default(),
+				});
+			}
+			if matches!(
+				self,
+				AIProvider::OpenAI(_)
+					| AIProvider::CodexSubscription(_)
+					| AIProvider::Copilot(_)
+					| AIProvider::Azure(_)
+			) {
+				req.normalize_openai_token_limit();
+			}
+			self
+				.process_chat_request(
+					backend_info,
+					policies,
+					InputFormat::Completions,
+					req,
+					parts,
+					tokenize,
+					log,
+					catalog,
+					types::ChatRequest::Completions,
+				)
+				.await
 		}
-		if matches!(
-			self,
-			AIProvider::OpenAI(_)
-				| AIProvider::CodexSubscription(_)
-				| AIProvider::Copilot(_)
-				| AIProvider::Azure(_)
-		) {
-			req.normalize_openai_token_limit();
+		.await;
+		match result {
+			Err(error @ (AIError::UnsupportedConversion(_) | AIError::UnsupportedContent | AIError::RequestParsing(_) | AIError::MissingField(_) | AIError::MessageNotFound)) if matches!(self, AIProvider::CodexSubscription(_)) => {
+				Ok(RequestResult::Rejected(::http::Response::builder()
+					.status(http::StatusCode::BAD_REQUEST)
+					.header(header::CONTENT_TYPE, "application/json")
+					.body(Body::from(serde_json::json!({"error": {"type": "invalid_request_error", "message": error.to_string()}}).to_string()))
+					.expect("valid Codex request error response")))
+			},
+			result => result,
 		}
-		self
-			.process_chat_request(
-				backend_info,
-				policies,
-				InputFormat::Completions,
-				req,
-				parts,
-				tokenize,
-				log,
-				catalog,
-				types::ChatRequest::Completions,
-			)
-			.await
 	}
 
 	pub async fn process_messages_request(
@@ -2241,43 +2292,77 @@ impl AIProvider {
 				resp,
 			);
 		}
-		let model_catalog = model_catalog.map(Arc::as_ref);
+		let codex_chat = matches!(self, AIProvider::CodexSubscription(_))
+			&& req.input_format == InputFormat::Completions;
+		let result = Box::pin(async {
+			let model_catalog = model_catalog.map(Arc::as_ref);
 
-		let mut buffered = Self::buffer_response(resp).await?;
-		if matches!(self, AIProvider::CodexSubscription(_))
-			&& req.input_format == InputFormat::Responses
-			&& buffered.parts.status.is_success()
-		{
-			codex_responses::normalize_unary_response(&mut buffered)?;
-		}
+			let mut buffered = Self::buffer_response(resp).await?;
+			if matches!(self, AIProvider::CodexSubscription(_))
+				&& matches!(
+					req.input_format,
+					InputFormat::Responses | InputFormat::Completions
+				) && buffered.parts.status.is_success()
+			{
+				codex_responses::normalize_unary_response(&mut buffered)?;
+				if req.input_format == InputFormat::Completions && buffered.parts.status.is_success() {
+					let response: serde_json::Value =
+						serde_json::from_slice(&buffered.bytes).map_err(AIError::ResponseParsing)?;
+					if response["status"] == "failed" {
+						buffered.parts.status = http::StatusCode::BAD_GATEWAY;
+						buffered.bytes = serde_json::to_vec(&serde_json::json!({"error": response["error"]}))
+							.map_err(AIError::ResponseMarshal)?
+							.into();
+					}
+				}
+			}
 
-		match req.input_format {
-			InputFormat::CountTokens => {
-				self.process_count_tokens_response(req, buffered, model_catalog, &log)
+			match req.input_format {
+				InputFormat::CountTokens => {
+					self.process_count_tokens_response(req, buffered, model_catalog, &log)
+				},
+				InputFormat::GeminiCountTokens => {
+					self.process_gemini_count_tokens_response(req, buffered, model_catalog, &log)
+				},
+				InputFormat::Embeddings => {
+					self.process_embeddings_buffered_response(req, buffered, model_catalog, &log)
+				},
+				InputFormat::Rerank => {
+					self.process_rerank_buffered_response(req, buffered, model_catalog, &log)
+				},
+				_ => {
+					self
+						.process_chat_or_detect_buffered_response(
+							client,
+							req,
+							rate_limit,
+							req_snapshot,
+							log,
+							log_content,
+							model_catalog,
+							buffered,
+						)
+						.await
+				},
+			}
+		})
+		.await;
+		match result {
+			Err(error) if codex_chat => {
+				let message = error.to_string();
+				let mut response =
+					crate::proxy::ProxyError::AIResponse(error).into_response_with_grpc(false);
+				response.headers_mut().insert(
+					header::CONTENT_TYPE,
+					HeaderValue::from_static("application/json"),
+				);
+				response.headers_mut().remove(header::CONTENT_LENGTH);
+				*response.body_mut() = Body::from(
+					serde_json::json!({"error": {"type": "api_error", "message": message}}).to_string(),
+				);
+				Ok(response)
 			},
-			InputFormat::GeminiCountTokens => {
-				self.process_gemini_count_tokens_response(req, buffered, model_catalog, &log)
-			},
-			InputFormat::Embeddings => {
-				self.process_embeddings_buffered_response(req, buffered, model_catalog, &log)
-			},
-			InputFormat::Rerank => {
-				self.process_rerank_buffered_response(req, buffered, model_catalog, &log)
-			},
-			_ => {
-				self
-					.process_chat_or_detect_buffered_response(
-						client,
-						req,
-						rate_limit,
-						req_snapshot,
-						log,
-						log_content,
-						model_catalog,
-						buffered,
-					)
-					.await
-			},
+			result => result,
 		}
 	}
 
@@ -2672,6 +2757,12 @@ impl AIProvider {
 	) -> Result<Response, AIError> {
 		let model = req.request_model.clone();
 		let input_format = req.input_format;
+		let include_usage = matches!(
+			req.provider_state,
+			Some(ProviderState::CodexCompletions {
+				include_usage: true
+			})
+		);
 		let bedrock_tool_name_map = bedrock_tool_name_map(&req).cloned();
 		let chat_translation = if input_format.is_chat() {
 			Some(self.chat_translation(
@@ -2759,6 +2850,7 @@ impl AIProvider {
 			translation.stream(
 				resp,
 				ChatStreamContext {
+					include_usage,
 					buffer_limit: buffer,
 					logger,
 					model: model.to_string(),

@@ -1,11 +1,42 @@
 use axum_core::body::Body;
-use bytes::Bytes;
+use bytes::{Bytes, BytesMut};
 use futures_util::StreamExt;
 use futures_util::stream::{self, BoxStream};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
-use tokio_sse_codec::{Event, Frame, SseDecoder};
-use tokio_util::codec::BytesCodec;
+use tokio_sse_codec::{Event, Frame};
+use tokio_util::codec::{BytesCodec, Decoder};
+
+/// The upstream codec mistakes a CRLF blank line for an unknown field when CR
+/// and LF arrive in different body frames. Withhold trailing CR until the next
+/// decode without changing wire data, event semantics, or its size limit.
+pub(crate) struct SseDecoder<T>(tokio_sse_codec::SseDecoder<T>);
+
+impl SseDecoder<Bytes> {
+	pub(crate) fn with_max_size(limit: usize) -> Self {
+		Self(tokio_sse_codec::SseDecoder::with_max_size(limit))
+	}
+}
+
+impl Decoder for SseDecoder<Bytes> {
+	type Item = Frame<Bytes>;
+	type Error = tokio_sse_codec::SseDecodeError;
+
+	fn decode(&mut self, src: &mut BytesMut) -> Result<Option<Self::Item>, Self::Error> {
+		let suffix = if src.last() == Some(&b'\r') {
+			src.split_off(src.len() - 1)
+		} else {
+			BytesMut::new()
+		};
+		let result = self.0.decode(src);
+		src.unsplit(suffix);
+		result
+	}
+
+	fn decode_eof(&mut self, src: &mut BytesMut) -> Result<Option<Self::Item>, Self::Error> {
+		self.0.decode_eof(src)
+	}
+}
 
 use super::passthrough::parser as passthrough_parser;
 use super::transform::{TransformEvent, parser as transform_parser};

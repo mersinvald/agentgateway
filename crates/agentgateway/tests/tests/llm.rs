@@ -374,6 +374,256 @@ llm:
 	assert_eq!(mock.received_requests().await.unwrap().len(), 1);
 }
 
+fn codex_completion_sse() -> String {
+	let mut response: Value =
+		serde_json::from_slice(llm_body!("response/responses/basic.json")).unwrap();
+	response["model"] = json!("gpt-5.6-luna");
+	response["output"][0]["content"][0]["text"] = json!("Hello!");
+	let item = response["output"][0].clone();
+	response["output"] = json!([]);
+	[
+		json!({"type": "response.created", "response": response}),
+		json!({"type": "response.output_text.delta", "output_index": 0, "content_index": 0, "delta": "Hello"}),
+		json!({"type": "response.output_text.delta", "output_index": 0, "content_index": 0, "delta": "!"}),
+		json!({"type": "response.output_item.done", "output_index": 0, "item": item}),
+		json!({"type": "response.completed", "response": response}),
+	].iter().map(|event| format!("data: {event}\n\n")).collect()
+}
+
+#[tokio::test]
+async fn llm_codex_subscription_completions_facade_and_openai_isolation() {
+	for codex in [true, false] {
+		for streaming in [false, true] {
+			for include_usage in [None, Some(false), Some(true)] {
+				let mock = MockServer::start().await;
+				Mock::given(wiremock::matchers::method("GET"))
+					.respond_with(ResponseTemplate::new(200).set_body_json(
+						json!({"models": [{"slug": "gpt-5.6-luna", "visibility": "list", "supported_in_api": true}]}),
+					))
+					.mount(&mock)
+					.await;
+				let upstream_body = if codex {
+					codex_completion_sse()
+				} else if streaming {
+					"data: {\"id\":\"chat_1\",\"object\":\"chat.completion.chunk\",\"model\":\"gpt-5.6-luna\",\"created\":123,\"choices\":[{\"index\":0,\"delta\":{\"content\":\"Hello!\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n".to_owned()
+				} else {
+					String::from_utf8_lossy(llm_body!("response/completions/basic.json")).into_owned()
+				};
+				Mock::given(wiremock::matchers::method("POST"))
+					.respond_with(ResponseTemplate::new(200).set_body_raw(
+						upstream_body.clone(),
+						if codex || streaming {
+							"text/event-stream"
+						} else {
+							"application/json"
+						},
+					))
+					.mount(&mock)
+					.await;
+				let ai = if codex {
+					AIProvider::CodexSubscription(codex_subscription::Provider {
+						refresh_interval: Duration::from_secs(60),
+						stale_while_revalidate: Duration::from_secs(60),
+						allow_models: vec!["*".into()],
+						deny_models: vec![],
+					})
+				} else {
+					AIProvider::OpenAI(openai::Provider {
+						model: None,
+						moderation: None,
+					})
+				};
+				let mut provider = llm_named_provider(&mock, ai, false);
+				provider.path_prefix = Some(
+					if codex {
+						codex_subscription::DEFAULT_BASE_PATH
+					} else {
+						"/v1"
+					}
+					.into(),
+				);
+				let (mock, _bind, io) = setup_llm_named_provider_mock(mock, provider, "{}");
+				let mut request = json!({"model": if codex { "openai/gpt-5.6-luna" } else { "gpt-5.6-luna" }, "messages": [{"role": "user", "content": "Hello"}], "temperature": 0.7, "max_tokens": 256, "stream": streaming});
+				if let Some(include_usage) = include_usage {
+					request["stream_options"] = json!({"include_usage": include_usage});
+				}
+				if include_usage == Some(false) {
+					let neutral = json!({"n": 1, "logprobs": false, "top_logprobs": null, "logit_bias": {}, "frequency_penalty": 0, "presence_penalty": 0, "top_p": 1, "stop": null, "seed": null, "store": false});
+					request
+						.as_object_mut()
+						.unwrap()
+						.extend(neutral.as_object().unwrap().clone());
+				}
+				let response = RequestBuilder::new(Method::POST, "http://lo/v1/chat/completions")
+					.body(Body::from(request.to_string()))
+					.send(io)
+					.await
+					.unwrap();
+				let status = response.status();
+				let content_type = response.headers()["content-type"]
+					.to_str()
+					.unwrap()
+					.to_owned();
+				let body = read_body_raw(response.into_body()).await;
+				assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
+				if streaming {
+					assert!(content_type.starts_with("text/event-stream"));
+					let body = String::from_utf8(body.to_vec()).unwrap();
+					assert_eq!(body.matches("[DONE]").count(), 1, "{body}");
+					if codex {
+						assert!(!body.contains("response.output"));
+						let chunks: Vec<Value> = body
+							.lines()
+							.filter_map(|line| line.strip_prefix("data: "))
+							.filter(|line| *line != "[DONE]")
+							.map(|line| serde_json::from_str(line).unwrap())
+							.collect();
+						assert_eq!(
+							chunks
+								.iter()
+								.filter_map(|c| c["choices"][0]["delta"]["content"].as_str())
+								.collect::<String>(),
+							"Hello!"
+						);
+						assert_eq!(
+							chunks.iter().filter(|c| c["choices"] == json!([])).count(),
+							usize::from(include_usage.unwrap_or_default())
+						);
+						for chunk in &chunks {
+							assert_eq!(chunk["object"], "chat.completion.chunk");
+							assert_eq!(chunk["model"], "gpt-5.6-luna");
+							assert_eq!(chunk["id"], chunks[0]["id"]);
+							assert_eq!(chunk["created"], chunks[0]["created"]);
+						}
+						assert_eq!(chunks[0]["choices"][0]["delta"]["role"], "assistant");
+						assert_eq!(
+							chunks
+								.iter()
+								.filter_map(|c| c["choices"][0]["finish_reason"].as_str())
+								.collect::<Vec<_>>(),
+							["stop"]
+						);
+					} else {
+						assert_eq!(body, upstream_body);
+					}
+				} else {
+					assert!(content_type.starts_with("application/json"));
+					let body: Value = serde_json::from_slice(&body).unwrap();
+					assert_eq!(body["object"], "chat.completion");
+					if codex {
+						assert_eq!(body["choices"][0]["message"]["content"], "Hello!");
+						assert_eq!(body["choices"][0]["finish_reason"], "stop");
+						assert!(body["usage"]["prompt_tokens"].is_number());
+					}
+				}
+				let requests = mock.received_requests().await.unwrap();
+				let upstream = requests.iter().find(|r| r.method == Method::POST).unwrap();
+				assert_eq!(
+					upstream.url.path(),
+					if codex {
+						"/backend-api/codex/responses"
+					} else {
+						"/v1/chat/completions"
+					}
+				);
+				let body: Value = serde_json::from_slice(&upstream.body).unwrap();
+				if codex {
+					assert_eq!(
+						body["input"],
+						json!([{"role": "user", "content": [{"type": "input_text", "text": "Hello"}]}])
+					);
+					assert_eq!(body["store"], false);
+					assert_eq!(body["stream"], true);
+					assert_eq!(body["instructions"], "");
+					for key in [
+						"messages",
+						"temperature",
+						"max_tokens",
+						"max_completion_tokens",
+						"max_output_tokens",
+						"stream_options",
+					] {
+						assert!(body.get(key).is_none(), "{key}");
+					}
+				} else {
+					assert_eq!(body["messages"], request["messages"]);
+					assert!(body.get("input").is_none());
+					assert_eq!(body["temperature"], request["temperature"]);
+					assert_eq!(body["max_completion_tokens"], 256);
+				}
+			}
+		}
+	}
+}
+
+#[tokio::test]
+async fn llm_codex_subscription_completions_rejects_unsupported_and_upstream_errors() {
+	let mock = MockServer::start().await;
+	Mock::given(wiremock::matchers::method("GET"))
+		.respond_with(ResponseTemplate::new(200).set_body_json(
+			json!({"models": [{"slug": "gpt-5.6-luna", "visibility": "list", "supported_in_api": true}]}),
+		))
+		.mount(&mock)
+		.await;
+	let provider = llm_named_provider(
+		&mock,
+		AIProvider::CodexSubscription(codex_subscription::Provider {
+			refresh_interval: Duration::from_secs(60),
+			stale_while_revalidate: Duration::from_secs(60),
+			allow_models: vec!["*".into()],
+			deny_models: vec![],
+		}),
+		false,
+	);
+	let (mock, _bind, io) = setup_llm_named_provider_mock(mock, provider, "{}");
+	for extra in [
+		json!({"n": 2}),
+		json!({"n": 0}),
+		json!({"n": "bad"}),
+		json!({"logprobs": true}),
+		json!({"audio": {"voice": "alloy"}}),
+	] {
+		let mut request =
+			json!({"model": "openai/gpt-5.6-luna", "messages": [{"role": "user", "content": "Hello"}]});
+		request
+			.as_object_mut()
+			.unwrap()
+			.extend(extra.as_object().unwrap().clone());
+		let response = RequestBuilder::new(Method::POST, "http://lo/v1/chat/completions")
+			.body(Body::from(request.to_string()))
+			.send(io.clone())
+			.await
+			.unwrap();
+		let status = response.status();
+		let body: Value = serde_json::from_slice(&read_body_raw(response.into_body()).await).unwrap();
+		assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+		assert_eq!(body["error"]["type"], "invalid_request_error");
+	}
+	assert!(
+		mock
+			.received_requests()
+			.await
+			.unwrap()
+			.iter()
+			.all(|r| r.method != Method::POST)
+	);
+	for (status, wire, expected_status, expected_code) in [
+		(429, json!({"error": {"type": "rate_limit_error", "code": "rate_limit", "message": "try later"}}).to_string(), StatusCode::TOO_MANY_REQUESTS, Some("rate_limit")),
+		(200, "data: {\"type\":\"response.failed\",\"response\":{\"status\":\"failed\",\"error\":{\"code\":\"server_error\",\"message\":\"failed\"}}}\n\n".into(), StatusCode::BAD_GATEWAY, Some("server_error")),
+		(200, "data: {\"type\":\"error\",\"code\":\"server_error\",\"message\":\"failed\"}\n\n".into(), StatusCode::BAD_GATEWAY, Some("server_error")),
+		(200, "data: [DONE]\n\n".into(), StatusCode::BAD_GATEWAY, None),
+	] {
+		let guard = Mock::given(wiremock::matchers::method("POST")).respond_with(ResponseTemplate::new(status).set_body_raw(wire, if status == 200 { "text/event-stream" } else { "application/json" })).mount_as_scoped(&mock).await;
+		let response = send_completions_with_model(io.clone(), "openai/gpt-5.6-luna", &[]).await;
+		let status = response.status();
+		let body: Value = serde_json::from_slice(&read_body_raw(response.into_body()).await).unwrap();
+		assert_eq!(status, expected_status, "{body}");
+		assert!(body.get("choices").is_none());
+		if let Some(code) = expected_code { assert_eq!(body["error"]["code"], code); }
+		drop(guard);
+	}
+}
+
 #[tokio::test]
 async fn llm_codex_subscription_responses_contract_and_openai_isolation() {
 	for codex in [true, false] {
@@ -752,10 +1002,10 @@ async fn llm_codex_subscription_admits_catalog_models_before_inference() {
 		.mount(&mock)
 		.await;
 	Mock::given(wiremock::matchers::method("POST"))
-		.respond_with(ResponseTemplate::new(StatusCode::OK.as_u16()).set_body_raw(
-			llm_body!("response/completions/basic.json"),
-			"application/json",
-		))
+		.respond_with(
+			ResponseTemplate::new(StatusCode::OK.as_u16())
+				.set_body_raw(codex_completion_sse(), "text/event-stream"),
+		)
 		.mount(&mock)
 		.await;
 	let provider = llm_named_provider(
@@ -891,10 +1141,8 @@ async fn llm_codex_subscription_refreshes_model_unavailable_once() {
 							"error": {"code": "model_not_found", "message": "retired"}
 						}))
 					} else {
-						ResponseTemplate::new(StatusCode::OK.as_u16()).set_body_raw(
-							llm_body!("response/completions/basic.json"),
-							"application/json",
-						)
+						ResponseTemplate::new(StatusCode::OK.as_u16())
+							.set_body_raw(codex_completion_sse(), "text/event-stream")
 					}
 				}
 			}
