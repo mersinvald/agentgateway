@@ -5,9 +5,9 @@
     {"role": "developer", "content": [{"type": "text", "text": "Use tools when needed."}]},
     {"role": "user", "content": [{"type": "text", "text": "Describe this."}, {"type": "image_url", "image_url": {"url": "https://example.com/image.png", "detail": "high"}}]},
     {"role": "assistant", "content": "Checking.", "tool_calls": [{"id": "call_1", "type": "function", "function": {"name": "lookup", "arguments": "{\"query\":\"image\"}"}}]},
-    {"role": "tool", "tool_call_id": "call_1", "content": "Found a cat."},
+    {"role": "tool", "name": "lookup", "tool_call_id": "call_1", "content": "Found a cat."},
     {"role": "assistant", "content": null, "tool_calls": [{"id": "call_2", "type": "function", "function": {"name": "lookup", "arguments": "{}"}}]},
-    {"role": "tool", "tool_call_id": "call_2", "content": [{"type": "text", "text": "Confirmed."}]},
+    {"role": "tool", "name": "lookup", "tool_call_id": "call_2", "content": [{"type": "text", "text": "Confirmed."}]},
     {"role": "assistant", "content": null, "refusal": "Cannot help with that request."},
     {"role": "assistant", "content": [{"type": "text", "text": "For that alternative: "}, {"type": "refusal", "refusal": "I cannot provide those details."}]},
     {"role": "user", "content": "Hello"}

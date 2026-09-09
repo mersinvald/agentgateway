@@ -447,6 +447,13 @@ async fn llm_codex_subscription_completions_facade_and_openai_isolation() {
 				if let Some(include_usage) = include_usage {
 					request["stream_options"] = json!({"include_usage": include_usage});
 				}
+				if include_usage == Some(true) {
+					request["messages"].as_array_mut().unwrap().extend([
+						json!({"role": "assistant", "tool_calls": [{"id": "call_1", "type": "function", "function": {"name": "lookup", "arguments": "{}"}}]}),
+						json!({"role": "tool", "name": "lookup", "tool_call_id": "call_1", "content": "found"}),
+						json!({"role": "user", "content": "Hello"}),
+					]);
+				}
 				if include_usage == Some(false) {
 					let neutral = json!({"n": 1, "logprobs": false, "top_logprobs": null, "logit_bias": {}, "frequency_penalty": 0, "presence_penalty": 0, "top_p": 1, "stop": null, "seed": null, "store": false});
 					request
@@ -528,10 +535,16 @@ async fn llm_codex_subscription_completions_facade_and_openai_isolation() {
 				);
 				let body: Value = serde_json::from_slice(&upstream.body).unwrap();
 				if codex {
-					assert_eq!(
-						body["input"],
-						json!([{"role": "user", "content": [{"type": "input_text", "text": "Hello"}]}])
-					);
+					let mut expected_input =
+						vec![json!({"role": "user", "content": [{"type": "input_text", "text": "Hello"}]})];
+					if include_usage == Some(true) {
+						expected_input.extend([
+							json!({"type": "function_call", "call_id": "call_1", "name": "lookup", "arguments": "{}"}),
+							json!({"type": "function_call_output", "call_id": "call_1", "output": "found"}),
+							json!({"role": "user", "content": [{"type": "input_text", "text": "Hello"}]}),
+						]);
+					}
+					assert_eq!(body["input"], json!(expected_input));
 					assert_eq!(body["store"], false);
 					assert_eq!(body["stream"], true);
 					assert_eq!(body["instructions"], "");

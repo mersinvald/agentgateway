@@ -105,11 +105,20 @@ pub fn translate(req: &types::completions::Request) -> Result<Vec<u8>, AIError> 
 				"tool_call_id",
 				"reasoning_content",
 				"refusal",
+				"name",
 			],
 		)?;
 		let role = string(message, "role")?;
 		if !matches!(role, "system" | "developer" | "user" | "assistant" | "tool") {
 			return Err(unsupported("message role"));
+		}
+		if !message["name"].is_null() {
+			if role != "tool" {
+				return Err(unsupported("name on non-tool message"));
+			}
+			// Hermes retains this redundant tool label. Responses links results by
+			// call_id; forwarding name would be invalid, and changing content is unnecessary.
+			string(message, "name")?;
 		}
 		if role != "assistant" && !message["tool_calls"].is_null() {
 			return Err(unsupported("tool_calls on non-assistant message"));
@@ -757,13 +766,36 @@ mod tests {
 	fn public_tool_history_does_not_require_encrypted_reasoning() {
 		let request = serde_json::from_value(json!({"model": "gpt-5.6-luna", "messages": [
 			{"role": "assistant", "content": null, "reasoning_content": "I should look this up", "tool_calls": [{"id": "call_1", "type": "function", "function": {"name": "lookup", "arguments": "{}"}}]},
-			{"role": "tool", "tool_call_id": "call_1", "content": "found"}], "temperature": 0.7, "max_tokens": 256})).unwrap();
+			{"role": "tool", "name": "lookup", "tool_call_id": "call_1", "content": "found"}], "temperature": 0.7, "max_tokens": 256})).unwrap();
 		let value: Value = serde_json::from_slice(&translate(&request).unwrap()).unwrap();
 		assert_eq!(value["input"].as_array().unwrap().len(), 2);
 		assert_eq!(value["input"][0]["call_id"], "call_1");
+		assert_eq!(value["input"][0]["name"], "lookup");
+		assert_eq!(
+			value["input"][1],
+			json!({"type": "function_call_output", "call_id": "call_1", "output": "found"})
+		);
 		assert!(value.get("temperature").is_none());
 		assert!(value.get("max_output_tokens").is_none());
 		assert!(!value.to_string().contains("reasoning_content"));
+	}
+
+	#[test]
+	fn rejects_invalid_tool_names_and_named_participants() {
+		for name in [json!(42), json!(false), json!([]), json!({})] {
+			let request = serde_json::from_value::<types::completions::Request>(json!({"messages": [
+				{"role": "tool", "name": name, "tool_call_id": "call_1", "content": "found"}
+			]}));
+			assert!(request.is_err());
+		}
+		// Participant names have meaning beyond a tool call ID; do not silently discard them.
+		for role in ["system", "developer", "user", "assistant"] {
+			let request = serde_json::from_value(json!({"messages": [
+				{"role": role, "name": "participant", "content": "Hello"}
+			]}))
+			.unwrap();
+			assert!(translate(&request).is_err());
+		}
 	}
 
 	#[test]
