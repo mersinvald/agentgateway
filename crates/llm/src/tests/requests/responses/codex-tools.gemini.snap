@@ -41,6 +41,12 @@ info:
   input:
     - role: user
       content: Update hello.txt
+    - type: message
+      role: assistant
+      phase: commentary
+      content:
+        - type: output_text
+          text: "I'll update the file and check the directory."
     - type: custom_tool_call
       id: ctc_history
       call_id: call_patch
@@ -76,6 +82,7 @@ info:
       },
       {
         "role": "assistant",
+        "content": "I'll update the file and check the directory.",
         "tool_calls": [
           {
             "type": "function",
@@ -207,6 +214,10 @@ info:
       {
         "role": "user",
         "content": "Update hello.txt"
+      },
+      {
+        "role": "assistant",
+        "content": "I'll update the file and check the directory."
       },
       {
         "role": "user",

@@ -13,6 +13,7 @@
   "tool_choice": {"type": "custom", "namespace": "functions", "name": "apply_patch"},
   "input": [
     {"role": "user", "content": "Update hello.txt"},
+    {"type": "message", "role": "assistant", "phase": "commentary", "content": [{"type": "output_text", "text": "I'll update the file and check the directory."}]},
     {"type": "custom_tool_call", "id": "ctc_history", "call_id": "call_patch", "namespace": "functions", "name": "apply_patch", "input": "*** Begin Patch\n*** Add File: hello.txt\n+привет\n*** End Patch"},
     {"type": "function_call", "id": "fc_history", "call_id": "call_exec", "namespace": "functions", "name": "exec_command", "arguments": "{\"cmd\":\"pwd\"}"},
     {"type": "custom_tool_call_output", "id": "ctco_history", "call_id": "call_patch", "output": "Success"},

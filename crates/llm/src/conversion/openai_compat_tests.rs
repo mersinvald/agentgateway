@@ -78,6 +78,10 @@ async fn stream(chunks: Vec<Value>, done: bool, limit: usize) -> Vec<Value> {
 fn custom_tool_history_uses_call_id_and_json_object_input() {
 	let (request, _) = from_responses::translate_request_with_context(&codex_request()).unwrap();
 	let request = serde_json::to_value(request).unwrap();
+	assert_eq!(
+		request["messages"][2]["content"],
+		"I'll update the file and check the directory."
+	);
 	assert_eq!(request["messages"][2]["tool_calls"][0]["id"], "call_patch");
 	assert_eq!(request["messages"][3]["tool_call_id"], "call_patch");
 	assert_eq!(request["messages"][4]["tool_call_id"], "call_exec");

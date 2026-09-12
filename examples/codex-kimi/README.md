@@ -68,7 +68,8 @@ python3 tools/codex-responses-smoke.py --codex /path/to/codex
 The smoke test launches the built Gateway, a deterministic loopback Chat
 Completions backend, and a real Codex CLI. It verifies that Codex executes a
 custom `apply_patch` call, writes a temporary file, replays the matching tool
-result, and completes the turn. It requires no API credentials and makes no
+result and assistant commentary, reads the file with its shell tool, and
+completes the turn. It requires no API credentials and makes no
 requests to a paid model. All test processes and temporary files are cleaned up.
 
 Also verified with Codex CLI 0.153.4 and the real `moonshotai/Kimi-K3` backend:

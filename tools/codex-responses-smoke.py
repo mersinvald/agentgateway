@@ -29,7 +29,7 @@ def main():
     parser.add_argument("--codex", default="codex")
     args = parser.parse_args()
     gateway = str(Path(args.gateway).resolve())
-    state = {"requests": 0, "tool_result": False, "errors": []}
+    state = {"requests": 0, "tool_result": False, "shell_result": False, "errors": []}
 
     class Backend(http.server.BaseHTTPRequestHandler):
         def log_message(self, *_):
@@ -41,19 +41,27 @@ def main():
                 body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
                 state["requests"] += 1
                 results = [m for m in body["messages"] if m["role"] == "tool"]
-                if results:
-                    assert any(m["tool_call_id"] == "call_smoke" for m in results)
-                    state["tool_result"] = True
+                tools = [t["function"] for t in body["tools"]]
+                if any(m["tool_call_id"] == "call_smoke_shell" for m in results):
+                    assert any("protocol-ok" in m["content"] for m in results if m["tool_call_id"] == "call_smoke_shell")
+                    state["shell_result"] = True
                     delta, finish = {"content": "protocol-ok"}, "stop"
+                elif results:
+                    assert any(m["tool_call_id"] == "call_smoke" for m in results)
+                    assert any(m.get("content") == "I'll create the file." for m in body["messages"] if m["role"] == "assistant")
+                    state["tool_result"] = True
+                    shell = next(t for t in tools if t["name"] == "exec_command" or "Tool: functions.exec_command" in t.get("description", ""))
+                    delta = {"content": "I'll verify the file.", "tool_calls": [{"index": 0, "id": "call_smoke_shell", "type": "function",
+                             "function": {"name": shell["name"], "arguments": json.dumps({"cmd": "cat smoke.txt", "max_output_tokens": 100})}}]}
+                    finish = "tool_calls"
                 else:
-                    tools = [t["function"] for t in body["tools"]]
                     state["tools"] = [{"name": t["name"], "properties": list(t.get("parameters", {}).get("properties", {}))} for t in tools]
                     patch = next(t for t in tools if "apply_patch" in t["name"]
                                  or "Apply a patch" in t.get("description", "")
                                  or "*** Begin Patch" in t.get("description", ""))
                     assert "input" in patch["parameters"]["properties"], patch["name"]
                     raw = "*** Begin Patch\n*** Add File: smoke.txt\n+protocol-ok\n*** End Patch"
-                    delta = {"tool_calls": [{"index": 0, "id": "call_smoke", "type": "function",
+                    delta = {"content": "I'll create the file.", "tool_calls": [{"index": 0, "id": "call_smoke", "type": "function",
                              "function": {"name": patch["name"], "arguments": json.dumps({"input": raw})}}]}
                     finish = "tool_calls"
                 chunk = {"id": "chatcmpl_smoke", "object": "chat.completion.chunk", "created": 1,
@@ -102,16 +110,17 @@ def main():
                            "-c", f'model_catalog_json="{catalog_path}"',
                            "-c", 'web_search="disabled"',
                            "-c", 'model_reasoning_effort="none"',
-                           "Create smoke.txt containing protocol-ok using apply_patch, then reply protocol-ok."]
+                           "Create smoke.txt containing protocol-ok using apply_patch, read it with a shell command, then reply protocol-ok."]
                 result = subprocess.run(command, capture_output=True, text=True, timeout=90, stdin=subprocess.DEVNULL)
                 assert not state["errors"], state["errors"]
                 if result.returncode:
                     log.seek(0)
                     raise AssertionError(json.dumps(state) + "\n" + log.read()[-6000:] + "\n" + result.stderr + result.stdout)
                 assert state["tool_result"], result.stdout + result.stderr
+                assert state["shell_result"], result.stdout + result.stderr
                 assert (workspace / "smoke.txt").read_text().strip() == "protocol-ok"
                 print(json.dumps({"result": "passed", "requests": state["requests"],
-                                  "custom_tool_executed": True, "tool_result_replayed": True}))
+                                  "custom_tool_executed": True, "tool_result_replayed": True, "shell_result_replayed": True}))
             finally:
                 process.terminate()
                 try:

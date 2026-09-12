@@ -134,7 +134,30 @@ impl ResponseToolMap {
 			request["tools"] = json!(flattened);
 		}
 		if let Some(items) = request["input"].as_array_mut() {
-			for item in items {
+			for (index, item) in items.iter_mut().enumerate() {
+				// Codex replays assistant output_text without response-only metadata.
+				// The SDK's OutputMessage requires it even in input history. These
+				// defaults exist only for typed conversion; Chat Completions uses
+				// the original role/text and does not receive the synthetic item ID.
+				if item["role"] == "assistant"
+					&& (item["type"].is_null() || item["type"] == "message")
+					&& item["content"]
+						.as_array()
+						.is_some_and(|parts| parts.iter().any(|part| part["type"] == "output_text"))
+				{
+					item["type"] = json!("message");
+					if item["id"].is_null() {
+						item["id"] = json!(format!("agw_history_{index}"));
+					}
+					if item["status"].is_null() {
+						item["status"] = json!("completed");
+					}
+					for part in item["content"].as_array_mut().unwrap() {
+						if part["type"] == "output_text" && part["annotations"].is_null() {
+							part["annotations"] = json!([]);
+						}
+					}
+				}
 				match item["type"].as_str() {
 					Some("function_call" | "custom_tool_call") => {
 						let custom = item["type"] == "custom_tool_call";
