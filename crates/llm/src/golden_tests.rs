@@ -180,6 +180,7 @@ mod requests {
 		("responses_agent_subset", &[RESPONSES]),
 	];
 	const RESPONSES_REQUESTS: &[(&str, &[&str])] = &[
+		("codex-tools", &[GEMINI]),
 		("basic", &[BEDROCK, GEMINI]),
 		("instructions", &[BEDROCK, GEMINI]),
 		("input-list", &[BEDROCK, GEMINI]),

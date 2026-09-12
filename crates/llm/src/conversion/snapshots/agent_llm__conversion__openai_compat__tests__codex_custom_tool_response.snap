@@ -1,0 +1,12 @@
+---
+source: crates/llm/src/conversion/openai_compat_tests.rs
+expression: call
+---
+{
+  "type": "custom_tool_call",
+  "call_id": "call_upstream",
+  "namespace": "functions",
+  "input": "*** Begin Patch\n+\"привет\\世界\"\n*** End Patch",
+  "name": "apply_patch",
+  "id": "call_upstream"
+}

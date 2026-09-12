@@ -1,0 +1,23 @@
+{
+  "models": [{
+    "slug": "moonshotai/Kimi-K3",
+    "display_name": "Kimi K3 (AgentGateway)",
+    "description": "Kimi through the AgentGateway Responses adapter",
+    "default_reasoning_level": "none",
+    "supported_reasoning_levels": [{"effort": "none", "description": "Use the upstream model's default thinking configuration"}],
+    "shell_type": "unified_exec",
+    "visibility": "list",
+    "supported_in_api": true,
+    "priority": 1,
+    "base_instructions": "You are a coding agent. Inspect the workspace, complete the user's requested changes, and verify them. Use the available tools to read files, execute commands, and apply patches. Follow the user's instructions and applicable AGENTS.md files. Never claim a tool action succeeded without checking its result.",
+    "apply_patch_tool_type": "freeform",
+    "supports_reasoning_summaries": false,
+    "support_verbosity": false,
+    "experimental_supported_tools": [],
+    "context_window": 65536,
+    "effective_context_window_percent": 95,
+    "truncation_policy": {"mode": "tokens", "limit": 10000},
+    "input_modalities": ["text"],
+    "supports_search_tool": false
+  }]
+}

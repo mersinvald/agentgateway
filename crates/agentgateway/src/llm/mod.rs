@@ -295,6 +295,7 @@ struct ChatRequestContext<'a> {
 struct ChatResponseContext<'a> {
 	model: &'a str,
 	tool_name_map: Option<&'a conversion::bedrock::BedrockToolNameMap>,
+	response_tools: Option<&'a conversion::openai_compat::ResponseToolMap>,
 }
 
 // Context provider to each response translation (streaming)
@@ -305,6 +306,7 @@ struct ChatStreamContext {
 	model: String,
 	log_content: LogContentFields,
 	tool_name_map: Option<conversion::bedrock::BedrockToolNameMap>,
+	response_tools: Option<conversion::openai_compat::ResponseToolMap>,
 }
 
 /// Ordered chat conversion table.
@@ -498,6 +500,19 @@ impl ChatTranslation {
 		req: types::ChatRequest,
 		ctx: &ChatRequestContext<'_>,
 	) -> Result<RenderedChatRequest, AIError> {
+		if self.output == ChatFormat::OpenAICompletions
+			&& let types::ChatRequest::Responses(ref responses) = req
+		{
+			let (mut translated, tools) =
+				conversion::openai_compat::from_responses::translate_request_with_context(responses)?;
+			apply_openai_moderation(&mut translated.moderation, ctx)?;
+			return Ok(RenderedChatRequest {
+				body: serde_json::to_vec(&translated).map_err(AIError::RequestMarshal)?,
+				provider_state: Some(ProviderState::ResponsesCompletions {
+					tools: Arc::new(tools),
+				}),
+			});
+		}
 		if self.output == ChatFormat::OpenAIResponses
 			&& let types::ChatRequest::Completions(ref completions) = req
 		{
@@ -544,7 +559,11 @@ impl ChatTranslation {
 				},
 				InputFormat::Messages => conversion::completions::from_messages::translate_response(bytes),
 				InputFormat::Responses => {
-					conversion::openai_compat::to_responses::translate_response(bytes, ctx.model)
+					conversion::openai_compat::to_responses::translate_response_with_context(
+						bytes,
+						ctx.model,
+						ctx.response_tools.unwrap_or(&Default::default()),
+					)
 				},
 				_ => Err(AIError::UnsupportedConversion(strng::format!(
 					"from {:?} to {:?}",
@@ -626,11 +645,12 @@ impl ChatTranslation {
 					)
 				}),
 				InputFormat::Responses => resp.map(|b| {
-					conversion::openai_compat::to_responses::translate_stream(
+					conversion::openai_compat::to_responses::translate_stream_with_context(
 						b,
 						ctx.buffer_limit,
 						ctx.logger,
 						ctx.log_content,
+						ctx.response_tools.unwrap_or_default(),
 					)
 				}),
 				_ => resp,
@@ -2739,6 +2759,7 @@ impl AIProvider {
 			&ChatResponseContext {
 				model: &req.request_model,
 				tool_name_map: bedrock_tool_name_map(req),
+				response_tools: response_tool_map(req),
 			},
 		)
 	}
@@ -2764,6 +2785,7 @@ impl AIProvider {
 			})
 		);
 		let bedrock_tool_name_map = bedrock_tool_name_map(&req).cloned();
+		let response_tools = response_tool_map(&req).cloned();
 		let chat_translation = if input_format.is_chat() {
 			Some(self.chat_translation(
 				input_format,
@@ -2856,6 +2878,7 @@ impl AIProvider {
 					model: model.to_string(),
 					log_content,
 					tool_name_map: bedrock_tool_name_map,
+					response_tools,
 				},
 			)
 		} else {
@@ -3103,6 +3126,13 @@ fn strip_alt_query(req: &mut Request) {
 fn bedrock_tool_name_map(req: &LLMRequest) -> Option<&conversion::bedrock::BedrockToolNameMap> {
 	match &req.provider_state {
 		Some(ProviderState::Bedrock { tool_names }) => Some(tool_names.as_ref()),
+		_ => None,
+	}
+}
+
+fn response_tool_map(req: &LLMRequest) -> Option<&conversion::openai_compat::ResponseToolMap> {
+	match &req.provider_state {
+		Some(ProviderState::ResponsesCompletions { tools }) => Some(tools.as_ref()),
 		_ => None,
 	}
 }

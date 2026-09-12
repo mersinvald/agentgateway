@@ -265,6 +265,9 @@ pub enum ProviderState {
 	CodexCompletions {
 		include_usage: bool,
 	},
+	ResponsesCompletions {
+		tools: Arc<conversion::openai_compat::ResponseToolMap>,
+	},
 	Bedrock {
 		tool_names: Arc<conversion::bedrock::BedrockToolNameMap>,
 	},

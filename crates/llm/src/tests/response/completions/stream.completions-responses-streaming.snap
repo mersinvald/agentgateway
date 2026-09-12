@@ -2,281 +2,281 @@
 source: crates/llm/src/golden_tests.rs
 description: src/tests/response/completions/stream.json
 ---
-event: event
-data: {"type":"response.created","sequence_number":1,"response":{"created_at":123,"id":"","model":"gpt-5-nano-2025-08-07","object":"response","output":[],"status":"in_progress"}}
+event: response.created
+data: {"response":{"created_at":123,"id":"","model":"gpt-5-nano-2025-08-07","object":"response","output":[],"status":"in_progress"},"type":"response.created","sequence_number":1}
 
-event: event
-data: {"type":"response.output_item.added","sequence_number":2,"output_index":0,"item":{"type":"message","content":[],"id":"","role":"assistant","status":"in_progress"}}
+event: response.output_item.added
+data: {"output_index":0,"item":{"type":"message","id":"","role":"assistant","status":"in_progress","content":[]},"type":"response.output_item.added","sequence_number":2}
 
-event: event
-data: {"type":"response.content_part.added","sequence_number":3,"item_id":"","output_index":0,"content_index":0,"part":{"type":"output_text","annotations":[],"logprobs":null,"text":""}}
+event: response.content_part.added
+data: {"item_id":"","output_index":0,"content_index":0,"part":{"type":"output_text","text":"","annotations":[]},"type":"response.content_part.added","sequence_number":3}
 
-event: event
-data: {"type":"response.output_text.delta","sequence_number":4,"item_id":"","output_index":0,"content_index":0,"delta":""}
+event: response.output_text.delta
+data: {"item_id":"","output_index":0,"content_index":0,"delta":"Hi","type":"response.output_text.delta","sequence_number":4}
 
-event: event
-data: {"type":"response.output_text.delta","sequence_number":5,"item_id":"","output_index":0,"content_index":0,"delta":"Hi"}
+event: response.output_text.delta
+data: {"item_id":"","output_index":0,"content_index":0,"delta":" there","type":"response.output_text.delta","sequence_number":5}
 
-event: event
-data: {"type":"response.output_text.delta","sequence_number":6,"item_id":"","output_index":0,"content_index":0,"delta":" there"}
+event: response.output_text.delta
+data: {"item_id":"","output_index":0,"content_index":0,"delta":"!","type":"response.output_text.delta","sequence_number":6}
 
-event: event
-data: {"type":"response.output_text.delta","sequence_number":7,"item_id":"","output_index":0,"content_index":0,"delta":"!"}
+event: response.output_text.delta
+data: {"item_id":"","output_index":0,"content_index":0,"delta":" How","type":"response.output_text.delta","sequence_number":7}
 
-event: event
-data: {"type":"response.output_text.delta","sequence_number":8,"item_id":"","output_index":0,"content_index":0,"delta":" How"}
+event: response.output_text.delta
+data: {"item_id":"","output_index":0,"content_index":0,"delta":" can","type":"response.output_text.delta","sequence_number":8}
 
-event: event
-data: {"type":"response.output_text.delta","sequence_number":9,"item_id":"","output_index":0,"content_index":0,"delta":" can"}
+event: response.output_text.delta
+data: {"item_id":"","output_index":0,"content_index":0,"delta":" I","type":"response.output_text.delta","sequence_number":9}
 
-event: event
-data: {"type":"response.output_text.delta","sequence_number":10,"item_id":"","output_index":0,"content_index":0,"delta":" I"}
+event: response.output_text.delta
+data: {"item_id":"","output_index":0,"content_index":0,"delta":" help","type":"response.output_text.delta","sequence_number":10}
 
-event: event
-data: {"type":"response.output_text.delta","sequence_number":11,"item_id":"","output_index":0,"content_index":0,"delta":" help"}
+event: response.output_text.delta
+data: {"item_id":"","output_index":0,"content_index":0,"delta":" today","type":"response.output_text.delta","sequence_number":11}
 
-event: event
-data: {"type":"response.output_text.delta","sequence_number":12,"item_id":"","output_index":0,"content_index":0,"delta":" today"}
+event: response.output_text.delta
+data: {"item_id":"","output_index":0,"content_index":0,"delta":"?","type":"response.output_text.delta","sequence_number":12}
 
-event: event
-data: {"type":"response.output_text.delta","sequence_number":13,"item_id":"","output_index":0,"content_index":0,"delta":"?"}
+event: response.output_text.delta
+data: {"item_id":"","output_index":0,"content_index":0,"delta":" If","type":"response.output_text.delta","sequence_number":13}
 
-event: event
-data: {"type":"response.output_text.delta","sequence_number":14,"item_id":"","output_index":0,"content_index":0,"delta":" If"}
+event: response.output_text.delta
+data: {"item_id":"","output_index":0,"content_index":0,"delta":" you","type":"response.output_text.delta","sequence_number":14}
 
-event: event
-data: {"type":"response.output_text.delta","sequence_number":15,"item_id":"","output_index":0,"content_index":0,"delta":" you"}
+event: response.output_text.delta
+data: {"item_id":"","output_index":0,"content_index":0,"delta":"’re","type":"response.output_text.delta","sequence_number":15}
 
-event: event
-data: {"type":"response.output_text.delta","sequence_number":16,"item_id":"","output_index":0,"content_index":0,"delta":"’re"}
+event: response.output_text.delta
+data: {"item_id":"","output_index":0,"content_index":0,"delta":" not","type":"response.output_text.delta","sequence_number":16}
 
-event: event
-data: {"type":"response.output_text.delta","sequence_number":17,"item_id":"","output_index":0,"content_index":0,"delta":" not"}
+event: response.output_text.delta
+data: {"item_id":"","output_index":0,"content_index":0,"delta":" sure","type":"response.output_text.delta","sequence_number":17}
 
-event: event
-data: {"type":"response.output_text.delta","sequence_number":18,"item_id":"","output_index":0,"content_index":0,"delta":" sure"}
+event: response.output_text.delta
+data: {"item_id":"","output_index":0,"content_index":0,"delta":" where","type":"response.output_text.delta","sequence_number":18}
 
-event: event
-data: {"type":"response.output_text.delta","sequence_number":19,"item_id":"","output_index":0,"content_index":0,"delta":" where"}
+event: response.output_text.delta
+data: {"item_id":"","output_index":0,"content_index":0,"delta":" to","type":"response.output_text.delta","sequence_number":19}
 
-event: event
-data: {"type":"response.output_text.delta","sequence_number":20,"item_id":"","output_index":0,"content_index":0,"delta":" to"}
+event: response.output_text.delta
+data: {"item_id":"","output_index":0,"content_index":0,"delta":" start","type":"response.output_text.delta","sequence_number":20}
 
-event: event
-data: {"type":"response.output_text.delta","sequence_number":21,"item_id":"","output_index":0,"content_index":0,"delta":" start"}
+event: response.output_text.delta
+data: {"item_id":"","output_index":0,"content_index":0,"delta":",","type":"response.output_text.delta","sequence_number":21}
 
-event: event
-data: {"type":"response.output_text.delta","sequence_number":22,"item_id":"","output_index":0,"content_index":0,"delta":","}
+event: response.output_text.delta
+data: {"item_id":"","output_index":0,"content_index":0,"delta":" I","type":"response.output_text.delta","sequence_number":22}
 
-event: event
-data: {"type":"response.output_text.delta","sequence_number":23,"item_id":"","output_index":0,"content_index":0,"delta":" I"}
+event: response.output_text.delta
+data: {"item_id":"","output_index":0,"content_index":0,"delta":" can","type":"response.output_text.delta","sequence_number":23}
 
-event: event
-data: {"type":"response.output_text.delta","sequence_number":24,"item_id":"","output_index":0,"content_index":0,"delta":" can"}
+event: response.output_text.delta
+data: {"item_id":"","output_index":0,"content_index":0,"delta":":\n\n","type":"response.output_text.delta","sequence_number":24}
 
-event: event
-data: {"type":"response.output_text.delta","sequence_number":25,"item_id":"","output_index":0,"content_index":0,"delta":":\n\n"}
+event: response.output_text.delta
+data: {"item_id":"","output_index":0,"content_index":0,"delta":"-","type":"response.output_text.delta","sequence_number":25}
 
-event: event
-data: {"type":"response.output_text.delta","sequence_number":26,"item_id":"","output_index":0,"content_index":0,"delta":"-"}
+event: response.output_text.delta
+data: {"item_id":"","output_index":0,"content_index":0,"delta":" Answer","type":"response.output_text.delta","sequence_number":26}
 
-event: event
-data: {"type":"response.output_text.delta","sequence_number":27,"item_id":"","output_index":0,"content_index":0,"delta":" Answer"}
+event: response.output_text.delta
+data: {"item_id":"","output_index":0,"content_index":0,"delta":" questions","type":"response.output_text.delta","sequence_number":27}
 
-event: event
-data: {"type":"response.output_text.delta","sequence_number":28,"item_id":"","output_index":0,"content_index":0,"delta":" questions"}
+event: response.output_text.delta
+data: {"item_id":"","output_index":0,"content_index":0,"delta":" or","type":"response.output_text.delta","sequence_number":28}
 
-event: event
-data: {"type":"response.output_text.delta","sequence_number":29,"item_id":"","output_index":0,"content_index":0,"delta":" or"}
+event: response.output_text.delta
+data: {"item_id":"","output_index":0,"content_index":0,"delta":" explain","type":"response.output_text.delta","sequence_number":29}
 
-event: event
-data: {"type":"response.output_text.delta","sequence_number":30,"item_id":"","output_index":0,"content_index":0,"delta":" explain"}
+event: response.output_text.delta
+data: {"item_id":"","output_index":0,"content_index":0,"delta":" concepts","type":"response.output_text.delta","sequence_number":30}
 
-event: event
-data: {"type":"response.output_text.delta","sequence_number":31,"item_id":"","output_index":0,"content_index":0,"delta":" concepts"}
+event: response.output_text.delta
+data: {"item_id":"","output_index":0,"content_index":0,"delta":"\n","type":"response.output_text.delta","sequence_number":31}
 
-event: event
-data: {"type":"response.output_text.delta","sequence_number":32,"item_id":"","output_index":0,"content_index":0,"delta":"\n"}
+event: response.output_text.delta
+data: {"item_id":"","output_index":0,"content_index":0,"delta":"-","type":"response.output_text.delta","sequence_number":32}
 
-event: event
-data: {"type":"response.output_text.delta","sequence_number":33,"item_id":"","output_index":0,"content_index":0,"delta":"-"}
+event: response.output_text.delta
+data: {"item_id":"","output_index":0,"content_index":0,"delta":" Help","type":"response.output_text.delta","sequence_number":33}
 
-event: event
-data: {"type":"response.output_text.delta","sequence_number":34,"item_id":"","output_index":0,"content_index":0,"delta":" Help"}
+event: response.output_text.delta
+data: {"item_id":"","output_index":0,"content_index":0,"delta":" with","type":"response.output_text.delta","sequence_number":34}
 
-event: event
-data: {"type":"response.output_text.delta","sequence_number":35,"item_id":"","output_index":0,"content_index":0,"delta":" with"}
+event: response.output_text.delta
+data: {"item_id":"","output_index":0,"content_index":0,"delta":" writing","type":"response.output_text.delta","sequence_number":35}
 
-event: event
-data: {"type":"response.output_text.delta","sequence_number":36,"item_id":"","output_index":0,"content_index":0,"delta":" writing"}
+event: response.output_text.delta
+data: {"item_id":"","output_index":0,"content_index":0,"delta":",","type":"response.output_text.delta","sequence_number":36}
 
-event: event
-data: {"type":"response.output_text.delta","sequence_number":37,"item_id":"","output_index":0,"content_index":0,"delta":","}
+event: response.output_text.delta
+data: {"item_id":"","output_index":0,"content_index":0,"delta":" editing","type":"response.output_text.delta","sequence_number":37}
 
-event: event
-data: {"type":"response.output_text.delta","sequence_number":38,"item_id":"","output_index":0,"content_index":0,"delta":" editing"}
+event: response.output_text.delta
+data: {"item_id":"","output_index":0,"content_index":0,"delta":",","type":"response.output_text.delta","sequence_number":38}
 
-event: event
-data: {"type":"response.output_text.delta","sequence_number":39,"item_id":"","output_index":0,"content_index":0,"delta":","}
+event: response.output_text.delta
+data: {"item_id":"","output_index":0,"content_index":0,"delta":" or","type":"response.output_text.delta","sequence_number":39}
 
-event: event
-data: {"type":"response.output_text.delta","sequence_number":40,"item_id":"","output_index":0,"content_index":0,"delta":" or"}
+event: response.output_text.delta
+data: {"item_id":"","output_index":0,"content_index":0,"delta":" brainstorming","type":"response.output_text.delta","sequence_number":40}
 
-event: event
-data: {"type":"response.output_text.delta","sequence_number":41,"item_id":"","output_index":0,"content_index":0,"delta":" brainstorming"}
+event: response.output_text.delta
+data: {"item_id":"","output_index":0,"content_index":0,"delta":"\n","type":"response.output_text.delta","sequence_number":41}
 
-event: event
-data: {"type":"response.output_text.delta","sequence_number":42,"item_id":"","output_index":0,"content_index":0,"delta":"\n"}
+event: response.output_text.delta
+data: {"item_id":"","output_index":0,"content_index":0,"delta":"-","type":"response.output_text.delta","sequence_number":42}
 
-event: event
-data: {"type":"response.output_text.delta","sequence_number":43,"item_id":"","output_index":0,"content_index":0,"delta":"-"}
+event: response.output_text.delta
+data: {"item_id":"","output_index":0,"content_index":0,"delta":" Assist","type":"response.output_text.delta","sequence_number":43}
 
-event: event
-data: {"type":"response.output_text.delta","sequence_number":44,"item_id":"","output_index":0,"content_index":0,"delta":" Assist"}
+event: response.output_text.delta
+data: {"item_id":"","output_index":0,"content_index":0,"delta":" with","type":"response.output_text.delta","sequence_number":44}
 
-event: event
-data: {"type":"response.output_text.delta","sequence_number":45,"item_id":"","output_index":0,"content_index":0,"delta":" with"}
+event: response.output_text.delta
+data: {"item_id":"","output_index":0,"content_index":0,"delta":" coding","type":"response.output_text.delta","sequence_number":45}
 
-event: event
-data: {"type":"response.output_text.delta","sequence_number":46,"item_id":"","output_index":0,"content_index":0,"delta":" coding"}
+event: response.output_text.delta
+data: {"item_id":"","output_index":0,"content_index":0,"delta":",","type":"response.output_text.delta","sequence_number":46}
 
-event: event
-data: {"type":"response.output_text.delta","sequence_number":47,"item_id":"","output_index":0,"content_index":0,"delta":","}
+event: response.output_text.delta
+data: {"item_id":"","output_index":0,"content_index":0,"delta":" math","type":"response.output_text.delta","sequence_number":47}
 
-event: event
-data: {"type":"response.output_text.delta","sequence_number":48,"item_id":"","output_index":0,"content_index":0,"delta":" math"}
+event: response.output_text.delta
+data: {"item_id":"","output_index":0,"content_index":0,"delta":",","type":"response.output_text.delta","sequence_number":48}
 
-event: event
-data: {"type":"response.output_text.delta","sequence_number":49,"item_id":"","output_index":0,"content_index":0,"delta":","}
+event: response.output_text.delta
+data: {"item_id":"","output_index":0,"content_index":0,"delta":" or","type":"response.output_text.delta","sequence_number":49}
 
-event: event
-data: {"type":"response.output_text.delta","sequence_number":50,"item_id":"","output_index":0,"content_index":0,"delta":" or"}
+event: response.output_text.delta
+data: {"item_id":"","output_index":0,"content_index":0,"delta":" data","type":"response.output_text.delta","sequence_number":50}
 
-event: event
-data: {"type":"response.output_text.delta","sequence_number":51,"item_id":"","output_index":0,"content_index":0,"delta":" data"}
+event: response.output_text.delta
+data: {"item_id":"","output_index":0,"content_index":0,"delta":" tasks","type":"response.output_text.delta","sequence_number":51}
 
-event: event
-data: {"type":"response.output_text.delta","sequence_number":52,"item_id":"","output_index":0,"content_index":0,"delta":" tasks"}
+event: response.output_text.delta
+data: {"item_id":"","output_index":0,"content_index":0,"delta":"\n","type":"response.output_text.delta","sequence_number":52}
 
-event: event
-data: {"type":"response.output_text.delta","sequence_number":53,"item_id":"","output_index":0,"content_index":0,"delta":"\n"}
+event: response.output_text.delta
+data: {"item_id":"","output_index":0,"content_index":0,"delta":"-","type":"response.output_text.delta","sequence_number":53}
 
-event: event
-data: {"type":"response.output_text.delta","sequence_number":54,"item_id":"","output_index":0,"content_index":0,"delta":"-"}
+event: response.output_text.delta
+data: {"item_id":"","output_index":0,"content_index":0,"delta":" Plan","type":"response.output_text.delta","sequence_number":54}
 
-event: event
-data: {"type":"response.output_text.delta","sequence_number":55,"item_id":"","output_index":0,"content_index":0,"delta":" Plan"}
+event: response.output_text.delta
+data: {"item_id":"","output_index":0,"content_index":0,"delta":" something","type":"response.output_text.delta","sequence_number":55}
 
-event: event
-data: {"type":"response.output_text.delta","sequence_number":56,"item_id":"","output_index":0,"content_index":0,"delta":" something"}
+event: response.output_text.delta
+data: {"item_id":"","output_index":0,"content_index":0,"delta":" (","type":"response.output_text.delta","sequence_number":56}
 
-event: event
-data: {"type":"response.output_text.delta","sequence_number":57,"item_id":"","output_index":0,"content_index":0,"delta":" ("}
+event: response.output_text.delta
+data: {"item_id":"","output_index":0,"content_index":0,"delta":"a","type":"response.output_text.delta","sequence_number":57}
 
-event: event
-data: {"type":"response.output_text.delta","sequence_number":58,"item_id":"","output_index":0,"content_index":0,"delta":"a"}
+event: response.output_text.delta
+data: {"item_id":"","output_index":0,"content_index":0,"delta":" trip","type":"response.output_text.delta","sequence_number":58}
 
-event: event
-data: {"type":"response.output_text.delta","sequence_number":59,"item_id":"","output_index":0,"content_index":0,"delta":" trip"}
+event: response.output_text.delta
+data: {"item_id":"","output_index":0,"content_index":0,"delta":",","type":"response.output_text.delta","sequence_number":59}
 
-event: event
-data: {"type":"response.output_text.delta","sequence_number":60,"item_id":"","output_index":0,"content_index":0,"delta":","}
+event: response.output_text.delta
+data: {"item_id":"","output_index":0,"content_index":0,"delta":" a","type":"response.output_text.delta","sequence_number":60}
 
-event: event
-data: {"type":"response.output_text.delta","sequence_number":61,"item_id":"","output_index":0,"content_index":0,"delta":" a"}
+event: response.output_text.delta
+data: {"item_id":"","output_index":0,"content_index":0,"delta":" project","type":"response.output_text.delta","sequence_number":61}
 
-event: event
-data: {"type":"response.output_text.delta","sequence_number":62,"item_id":"","output_index":0,"content_index":0,"delta":" project"}
+event: response.output_text.delta
+data: {"item_id":"","output_index":0,"content_index":0,"delta":",","type":"response.output_text.delta","sequence_number":62}
 
-event: event
-data: {"type":"response.output_text.delta","sequence_number":63,"item_id":"","output_index":0,"content_index":0,"delta":","}
+event: response.output_text.delta
+data: {"item_id":"","output_index":0,"content_index":0,"delta":" a","type":"response.output_text.delta","sequence_number":63}
 
-event: event
-data: {"type":"response.output_text.delta","sequence_number":64,"item_id":"","output_index":0,"content_index":0,"delta":" a"}
+event: response.output_text.delta
+data: {"item_id":"","output_index":0,"content_index":0,"delta":" study","type":"response.output_text.delta","sequence_number":64}
 
-event: event
-data: {"type":"response.output_text.delta","sequence_number":65,"item_id":"","output_index":0,"content_index":0,"delta":" study"}
+event: response.output_text.delta
+data: {"item_id":"","output_index":0,"content_index":0,"delta":" schedule","type":"response.output_text.delta","sequence_number":65}
 
-event: event
-data: {"type":"response.output_text.delta","sequence_number":66,"item_id":"","output_index":0,"content_index":0,"delta":" schedule"}
+event: response.output_text.delta
+data: {"item_id":"","output_index":0,"content_index":0,"delta":")\n","type":"response.output_text.delta","sequence_number":66}
 
-event: event
-data: {"type":"response.output_text.delta","sequence_number":67,"item_id":"","output_index":0,"content_index":0,"delta":")\n"}
+event: response.output_text.delta
+data: {"item_id":"","output_index":0,"content_index":0,"delta":"-","type":"response.output_text.delta","sequence_number":67}
 
-event: event
-data: {"type":"response.output_text.delta","sequence_number":68,"item_id":"","output_index":0,"content_index":0,"delta":"-"}
+event: response.output_text.delta
+data: {"item_id":"","output_index":0,"content_index":0,"delta":" Translate","type":"response.output_text.delta","sequence_number":68}
 
-event: event
-data: {"type":"response.output_text.delta","sequence_number":69,"item_id":"","output_index":0,"content_index":0,"delta":" Translate"}
+event: response.output_text.delta
+data: {"item_id":"","output_index":0,"content_index":0,"delta":" or","type":"response.output_text.delta","sequence_number":69}
 
-event: event
-data: {"type":"response.output_text.delta","sequence_number":70,"item_id":"","output_index":0,"content_index":0,"delta":" or"}
+event: response.output_text.delta
+data: {"item_id":"","output_index":0,"content_index":0,"delta":" practice","type":"response.output_text.delta","sequence_number":70}
 
-event: event
-data: {"type":"response.output_text.delta","sequence_number":71,"item_id":"","output_index":0,"content_index":0,"delta":" practice"}
+event: response.output_text.delta
+data: {"item_id":"","output_index":0,"content_index":0,"delta":" a","type":"response.output_text.delta","sequence_number":71}
 
-event: event
-data: {"type":"response.output_text.delta","sequence_number":72,"item_id":"","output_index":0,"content_index":0,"delta":" a"}
+event: response.output_text.delta
+data: {"item_id":"","output_index":0,"content_index":0,"delta":" language","type":"response.output_text.delta","sequence_number":72}
 
-event: event
-data: {"type":"response.output_text.delta","sequence_number":73,"item_id":"","output_index":0,"content_index":0,"delta":" language"}
+event: response.output_text.delta
+data: {"item_id":"","output_index":0,"content_index":0,"delta":"\n\n","type":"response.output_text.delta","sequence_number":73}
 
-event: event
-data: {"type":"response.output_text.delta","sequence_number":74,"item_id":"","output_index":0,"content_index":0,"delta":"\n\n"}
+event: response.output_text.delta
+data: {"item_id":"","output_index":0,"content_index":0,"delta":"Tell","type":"response.output_text.delta","sequence_number":74}
 
-event: event
-data: {"type":"response.output_text.delta","sequence_number":75,"item_id":"","output_index":0,"content_index":0,"delta":"Tell"}
+event: response.output_text.delta
+data: {"item_id":"","output_index":0,"content_index":0,"delta":" me","type":"response.output_text.delta","sequence_number":75}
 
-event: event
-data: {"type":"response.output_text.delta","sequence_number":76,"item_id":"","output_index":0,"content_index":0,"delta":" me"}
+event: response.output_text.delta
+data: {"item_id":"","output_index":0,"content_index":0,"delta":" what","type":"response.output_text.delta","sequence_number":76}
 
-event: event
-data: {"type":"response.output_text.delta","sequence_number":77,"item_id":"","output_index":0,"content_index":0,"delta":" what"}
+event: response.output_text.delta
+data: {"item_id":"","output_index":0,"content_index":0,"delta":" you","type":"response.output_text.delta","sequence_number":77}
 
-event: event
-data: {"type":"response.output_text.delta","sequence_number":78,"item_id":"","output_index":0,"content_index":0,"delta":" you"}
+event: response.output_text.delta
+data: {"item_id":"","output_index":0,"content_index":0,"delta":"’re","type":"response.output_text.delta","sequence_number":78}
 
-event: event
-data: {"type":"response.output_text.delta","sequence_number":79,"item_id":"","output_index":0,"content_index":0,"delta":"’re"}
+event: response.output_text.delta
+data: {"item_id":"","output_index":0,"content_index":0,"delta":" aiming","type":"response.output_text.delta","sequence_number":79}
 
-event: event
-data: {"type":"response.output_text.delta","sequence_number":80,"item_id":"","output_index":0,"content_index":0,"delta":" aiming"}
+event: response.output_text.delta
+data: {"item_id":"","output_index":0,"content_index":0,"delta":" for","type":"response.output_text.delta","sequence_number":80}
 
-event: event
-data: {"type":"response.output_text.delta","sequence_number":81,"item_id":"","output_index":0,"content_index":0,"delta":" for"}
+event: response.output_text.delta
+data: {"item_id":"","output_index":0,"content_index":0,"delta":",","type":"response.output_text.delta","sequence_number":81}
 
-event: event
-data: {"type":"response.output_text.delta","sequence_number":82,"item_id":"","output_index":0,"content_index":0,"delta":","}
+event: response.output_text.delta
+data: {"item_id":"","output_index":0,"content_index":0,"delta":" and","type":"response.output_text.delta","sequence_number":82}
 
-event: event
-data: {"type":"response.output_text.delta","sequence_number":83,"item_id":"","output_index":0,"content_index":0,"delta":" and"}
+event: response.output_text.delta
+data: {"item_id":"","output_index":0,"content_index":0,"delta":" I","type":"response.output_text.delta","sequence_number":83}
 
-event: event
-data: {"type":"response.output_text.delta","sequence_number":84,"item_id":"","output_index":0,"content_index":0,"delta":" I"}
+event: response.output_text.delta
+data: {"item_id":"","output_index":0,"content_index":0,"delta":"’ll","type":"response.output_text.delta","sequence_number":84}
 
-event: event
-data: {"type":"response.output_text.delta","sequence_number":85,"item_id":"","output_index":0,"content_index":0,"delta":"’ll"}
+event: response.output_text.delta
+data: {"item_id":"","output_index":0,"content_index":0,"delta":" tailor","type":"response.output_text.delta","sequence_number":85}
 
-event: event
-data: {"type":"response.output_text.delta","sequence_number":86,"item_id":"","output_index":0,"content_index":0,"delta":" tailor"}
+event: response.output_text.delta
+data: {"item_id":"","output_index":0,"content_index":0,"delta":" my","type":"response.output_text.delta","sequence_number":86}
 
-event: event
-data: {"type":"response.output_text.delta","sequence_number":87,"item_id":"","output_index":0,"content_index":0,"delta":" my"}
+event: response.output_text.delta
+data: {"item_id":"","output_index":0,"content_index":0,"delta":" help","type":"response.output_text.delta","sequence_number":87}
 
-event: event
-data: {"type":"response.output_text.delta","sequence_number":88,"item_id":"","output_index":0,"content_index":0,"delta":" help"}
+event: response.output_text.delta
+data: {"item_id":"","output_index":0,"content_index":0,"delta":".","type":"response.output_text.delta","sequence_number":88}
 
-event: event
-data: {"type":"response.output_text.delta","sequence_number":89,"item_id":"","output_index":0,"content_index":0,"delta":"."}
+event: response.output_text.done
+data: {"item_id":"","output_index":0,"content_index":0,"text":"Hi there! How can I help today? If you’re not sure where to start, I can:\n\n- Answer questions or explain concepts\n- Help with writing, editing, or brainstorming\n- Assist with coding, math, or data tasks\n- Plan something (a trip, a project, a study schedule)\n- Translate or practice a language\n\nTell me what you’re aiming for, and I’ll tailor my help.","type":"response.output_text.done","sequence_number":89}
 
-event: event
-data: {"type":"response.content_part.done","sequence_number":90,"item_id":"","output_index":0,"content_index":0,"part":{"type":"output_text","annotations":[],"logprobs":null,"text":""}}
+event: response.content_part.done
+data: {"item_id":"","output_index":0,"content_index":0,"part":{"type":"output_text","text":"Hi there! How can I help today? If you’re not sure where to start, I can:\n\n- Answer questions or explain concepts\n- Help with writing, editing, or brainstorming\n- Assist with coding, math, or data tasks\n- Plan something (a trip, a project, a study schedule)\n- Translate or practice a language\n\nTell me what you’re aiming for, and I’ll tailor my help.","annotations":[]},"type":"response.content_part.done","sequence_number":90}
 
-event: event
-data: {"type":"response.output_item.done","sequence_number":91,"output_index":0,"item":{"type":"message","content":[],"id":"","role":"assistant","status":"completed"}}
+event: response.output_item.done
+data: {"output_index":0,"item":{"type":"message","id":"","role":"assistant","status":"completed","content":[{"type":"output_text","text":"Hi there! How can I help today? If you’re not sure where to start, I can:\n\n- Answer questions or explain concepts\n- Help with writing, editing, or brainstorming\n- Assist with coding, math, or data tasks\n- Plan something (a trip, a project, a study schedule)\n- Translate or practice a language\n\nTell me what you’re aiming for, and I’ll tailor my help.","annotations":[]}]},"type":"response.output_item.done","sequence_number":91}
 
-event: event
-data: {"type":"response.completed","sequence_number":92,"response":{"created_at":123,"id":"","model":"gpt-5-nano-2025-08-07","object":"response","output":[],"status":"completed","usage":{"input_tokens":18,"input_tokens_details":{"cached_tokens":0,"cache_write_tokens":null},"output_tokens":286,"output_tokens_details":{"reasoning_tokens":192},"total_tokens":304}}}
+event: response.completed
+data: {"response":{"created_at":123,"id":"","model":"gpt-5-nano-2025-08-07","object":"response","output":[{"type":"message","id":"","role":"assistant","status":"completed","content":[{"type":"output_text","text":"Hi there! How can I help today? If you’re not sure where to start, I can:\n\n- Answer questions or explain concepts\n- Help with writing, editing, or brainstorming\n- Assist with coding, math, or data tasks\n- Plan something (a trip, a project, a study schedule)\n- Translate or practice a language\n\nTell me what you’re aiming for, and I’ll tailor my help.","annotations":[]}]}],"status":"completed","usage":{"input_tokens":18,"output_tokens":286,"total_tokens":304,"input_tokens_details":{"cached_tokens":0},"output_tokens_details":{"reasoning_tokens":192}}},"type":"response.completed","sequence_number":92}
 
 
 

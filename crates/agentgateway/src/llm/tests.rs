@@ -22,6 +22,94 @@ fn llm_request_with_tokens(input_tokens: Option<u64>) -> LLMRequest {
 	}
 }
 
+#[tokio::test]
+async fn codex_responses_custom_tools_round_trip_through_completions_backend() {
+	let provider = custom_provider(custom::ProviderFormat::Completions);
+	let inbound = json!({"model": "moonshotai/Kimi-K3", "input": "Patch the file", "stream": true,
+	"tools": [{"type": "namespace", "name": "functions", "tools": [
+		{"type": "custom", "name": "apply_patch", "format": {"type": "text"}}
+	]}]});
+	let request = ::http::Request::builder()
+		.uri("/v1/responses")
+		.header(::http::header::CONTENT_TYPE, "application/json")
+		.body(Body::from(inbound.to_string()))
+		.unwrap();
+	let RequestResult::Success {
+		request: mut forwarded,
+		llm_request,
+		upstream_route_type,
+	} = provider
+		.process_responses_request(
+			&openai_test_backend_info(),
+			None,
+			request,
+			false,
+			&mut None,
+			None,
+		)
+		.await
+		.unwrap()
+	else {
+		panic!("expected forwarded request")
+	};
+	assert_eq!(upstream_route_type, RouteType::Completions);
+	provider
+		.setup_request(
+			&mut forwarded,
+			upstream_route_type,
+			Some(&llm_request),
+			None,
+			None,
+			false,
+		)
+		.unwrap();
+	assert_eq!(forwarded.uri().path(), "/v1/chat/completions");
+	let body: Value =
+		serde_json::from_slice(&forwarded.into_body().collect().await.unwrap().to_bytes()).unwrap();
+	assert_eq!(
+		body["tools"][0]["function"]["parameters"]["properties"]["input"]["type"],
+		"string"
+	);
+	let name = &body["tools"][0]["function"]["name"];
+	let response = json!({"id": "chatcmpl_test", "object": "chat.completion", "created": 1, "model": "kimi",
+	"choices": [{"index": 0, "finish_reason": "tool_calls", "message": {"role": "assistant", "tool_calls": [
+		{"id": "call_patch", "type": "function", "function": {"name": name, "arguments": "{\"input\":\"patch text\"}"}}
+	]}}]});
+	let result = provider
+		.translate_chat_or_detect_response(&llm_request, &Bytes::from(response.to_string()), None)
+		.unwrap();
+	let result: Value = serde_json::from_slice(&result.serialize().unwrap()).unwrap();
+	assert_eq!(result["output"][0]["type"], "custom_tool_call");
+	assert_eq!(result["output"][0]["namespace"], "functions");
+	assert_eq!(result["output"][0]["call_id"], "call_patch");
+	assert_eq!(result["output"][0]["input"], "patch text");
+
+	let chunk = json!({"id": "chatcmpl_test", "object": "chat.completion.chunk", "created": 1, "model": "kimi",
+	"choices": [{"index": 0, "finish_reason": "tool_calls", "delta": {"tool_calls": [
+		{"index": 0, "id": "call_patch", "type": "function", "function": {"name": name, "arguments": "{\"input\":\"patch text\"}"}}
+	]}}]});
+	let response = provider
+		.chat_translation(InputFormat::Responses, Some("kimi"), None)
+		.unwrap()
+		.stream(
+			::http::Response::new(Body::from(format!("data: {chunk}\n\ndata: [DONE]\n\n"))),
+			ChatStreamContext {
+				include_usage: false,
+				buffer_limit: 4096,
+				logger: Default::default(),
+				model: "kimi".into(),
+				log_content: Default::default(),
+				tool_name_map: None,
+				response_tools: response_tool_map(&llm_request).cloned(),
+			},
+		);
+	let output = response.into_body().collect().await.unwrap().to_bytes();
+	let output = String::from_utf8(output.to_vec()).unwrap();
+	assert!(output.contains("event: response.custom_tool_call_input.done"));
+	assert!(output.contains("\"namespace\":\"functions\""));
+	assert!(output.contains("event: response.completed"));
+}
+
 #[test]
 fn vertex_gemini_uses_native_completions_and_compat_fallbacks() {
 	let provider = AIProvider::Vertex(vertex::Provider {

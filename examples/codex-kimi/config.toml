@@ -1,0 +1,18 @@
+# Merge into the user-level Codex config to use Kimi for new local app tasks.
+# A CLI-only alternative is ~/.codex/kimi.config.toml and `codex --profile kimi`.
+model = "moonshotai/Kimi-K3"
+model_provider = "agentgateway"
+model_catalog_json = "/ABSOLUTE/PATH/TO/agentgateway/examples/codex-kimi/models.json"
+model_reasoning_effort = "none"
+# Conservative client-side limits, not a claim about Kimi's maximum context.
+model_context_window = 65536
+model_auto_compact_token_limit = 49152
+web_search = "disabled"
+
+[model_providers.agentgateway]
+name = "AgentGateway"
+base_url = "http://127.0.0.1:4000/v1"
+env_key = "AGENTGATEWAY_API_KEY"
+wire_api = "responses"
+requires_openai_auth = false
+supports_websockets = false
