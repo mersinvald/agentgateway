@@ -1,6 +1,7 @@
 pub mod aws_sse;
 pub mod passthrough;
 pub mod sse;
+pub(crate) mod sse_liveness;
 pub mod transform;
 
 use bytes::{Bytes, BytesMut};

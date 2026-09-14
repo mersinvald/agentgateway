@@ -1,4 +1,11 @@
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
+
+use axum_core::body::Body;
 use bytes::Bytes;
+use futures_util::StreamExt;
+use http_body_util::BodyExt;
 use serde_json::{Value, json};
 
 use super::{from_responses, to_responses};
@@ -39,7 +46,6 @@ fn chunk(delta: Value, finish: Value) -> Value {
 }
 
 async fn stream(chunks: Vec<Value>, done: bool, limit: usize) -> Vec<Value> {
-	use http_body_util::BodyExt;
 	let (_, tools) = from_responses::translate_request_with_context(&codex_request()).unwrap();
 	let mut input: String = chunks
 		.into_iter()
@@ -72,6 +78,428 @@ async fn stream(chunks: Vec<Value>, done: bool, limit: usize) -> Vec<Value> {
 			data
 		})
 		.collect()
+}
+
+fn translated_body(body: Body) -> Body {
+	let (_, tools) = from_responses::translate_request_with_context(&codex_request()).unwrap();
+	to_responses::translate_stream_with_context(
+		body,
+		1024 * 1024,
+		Default::default(),
+		Default::default(),
+		tools,
+	)
+}
+
+fn wire_chunk(delta: Value, finish: Value) -> Bytes {
+	Bytes::from(format!("data: {}\n\n", chunk(delta, finish)))
+}
+
+fn wire_events(wire: &str) -> Vec<Value> {
+	wire
+		.split("\n\n")
+		.filter_map(|frame| frame.lines().find_map(|line| line.strip_prefix("data: ")))
+		.map(|data| serde_json::from_str(data).expect("complete JSON data event"))
+		.collect()
+}
+
+fn delayed_body(frames: Vec<Bytes>, delay: Duration) -> Body {
+	Body::from_stream(
+		futures_util::stream::iter(frames).then(move |frame| async move {
+			tokio::time::sleep(delay).await;
+			Ok::<_, std::io::Error>(frame)
+		}),
+	)
+}
+
+#[tokio::test(start_paused = true)]
+async fn long_reasoning_and_tool_arguments_keep_connection_alive_without_executing_partial_tools() {
+	for reasoning_only in [true, false] {
+		let input = "*** Begin Patch\n+\"привет\\世界\"\n*** End Patch";
+		let arguments = json!({"input": input}).to_string();
+		let pieces: Vec<_> = arguments.chars().collect();
+		let mut frames = Vec::new();
+		for i in 0..6 {
+			let delta = if reasoning_only {
+				json!({"reasoning_content": "thinking "})
+			} else {
+				let piece: String = pieces[i * pieces.len() / 6..(i + 1) * pieces.len() / 6]
+					.iter()
+					.collect();
+				let mut tool = json!({"index": 0, "function": {"arguments": piece}});
+				if i == 0 {
+					tool["id"] = json!("call_slow");
+					tool["function"]["name"] = json!("agw_tool_2");
+				}
+				json!({"tool_calls": [tool]})
+			};
+			frames.push(wire_chunk(delta, Value::Null));
+		}
+		frames.push(wire_chunk(
+			json!({}),
+			json!(if reasoning_only { "stop" } else { "tool_calls" }),
+		));
+		frames.push(Bytes::from_static(b"data: [DONE]\n\n"));
+		let start = tokio::time::Instant::now();
+		let mut last = start;
+		let mut body = translated_body(delayed_body(frames, Duration::from_secs(60)));
+		let mut wire = String::new();
+		while let Some(frame) = body.frame().await {
+			let bytes = frame.unwrap().into_data().unwrap();
+			let now = tokio::time::Instant::now();
+			assert!(
+				now - last <= Duration::from_secs(15),
+				"downstream went silent"
+			);
+			last = now;
+			wire.push_str(std::str::from_utf8(&bytes).unwrap());
+			if now - start < Duration::from_secs(480) {
+				assert!(!wire.contains("response.output_item.done"));
+				assert!(!wire.contains("response.custom_tool_call_input"));
+			}
+		}
+		assert_eq!(last - start, Duration::from_secs(480));
+		assert!(wire.matches(": keepalive\n\n").count() >= 24);
+		let events = wire_events(&wire);
+		for (i, event) in events.iter().enumerate() {
+			assert_eq!(event["sequence_number"], i + 1);
+		}
+		assert_eq!(events.last().unwrap()["type"], "response.completed");
+		let item = &events.last().unwrap()["response"]["output"][0];
+		if reasoning_only {
+			assert_eq!(item["content"][0]["text"], "thinking ".repeat(6));
+		} else {
+			assert_eq!(item["input"], input);
+			assert_eq!(
+				wire
+					.matches("event: response.custom_tool_call_input.done")
+					.count(),
+				1
+			);
+		}
+	}
+}
+
+#[tokio::test(start_paused = true)]
+async fn silent_upstream_fails_after_five_minutes_despite_keepalives() {
+	let start = tokio::time::Instant::now();
+	let upstream =
+		Body::from_stream(futures_util::stream::pending::<Result<Bytes, std::io::Error>>());
+	let wire = translated_body(upstream)
+		.collect()
+		.await
+		.unwrap()
+		.to_bytes();
+	let wire = std::str::from_utf8(&wire).unwrap();
+	assert_eq!(
+		tokio::time::Instant::now() - start,
+		Duration::from_secs(300)
+	);
+	assert_eq!(wire.matches(": keepalive\n\n").count(), 19);
+	let events = wire_events(wire);
+	assert_eq!(events.len(), 1);
+	assert_eq!(events[0]["type"], "response.failed");
+	assert_eq!(
+		events[0]["response"]["error"],
+		json!({
+			"code": "upstream_timeout",
+			"message": "upstream SSE stream made no progress for 300 seconds"
+		})
+	);
+}
+
+#[tokio::test(start_paused = true)]
+async fn empty_data_and_metadata_events_cannot_extend_progress_deadline() {
+	let mut empty_choices = chunk(json!({}), Value::Null);
+	empty_choices["choices"] = json!([]);
+	let mut usage_only = empty_choices.clone();
+	usage_only["usage"] = json!({"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15});
+	for event in [
+		empty_choices,
+		usage_only,
+		chunk(json!({}), Value::Null),
+		chunk(json!({"role": "assistant"}), Value::Null),
+		chunk(
+			json!({"content": "", "reasoning_content": "", "tool_calls": []}),
+			Value::Null,
+		),
+		chunk(
+			json!({"tool_calls": [{"index": 0, "id": "", "function": {"name": "", "arguments": ""}}]}),
+			Value::Null,
+		),
+	] {
+		let start = tokio::time::Instant::now();
+		let frames = vec![Bytes::from(format!("data: {event}\n\n")); 30];
+		let bytes = translated_body(delayed_body(frames, Duration::from_secs(30)))
+			.collect()
+			.await
+			.unwrap()
+			.to_bytes();
+		let wire = std::str::from_utf8(&bytes).unwrap();
+		assert_eq!(
+			tokio::time::Instant::now() - start,
+			Duration::from_secs(300),
+			"{event}"
+		);
+		assert!(wire.contains(": keepalive\n\n"));
+		assert!(!wire.contains("response.output_item.done"));
+		let events = wire_events(wire);
+		assert_eq!(
+			events.last().unwrap()["response"]["error"]["code"],
+			"upstream_timeout"
+		);
+	}
+}
+
+#[tokio::test(start_paused = true)]
+async fn finish_reason_counts_once_and_usage_does_not_extend_it() {
+	for send_done in [true, false] {
+		let start = tokio::time::Instant::now();
+		let prefix = delayed_body(
+			vec![wire_chunk(json!({}), json!("stop"))],
+			Duration::from_secs(240),
+		);
+		let usage = json!({"id": "chatcmpl_test", "model": "kimi", "created": 1, "choices": [], "usage": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15}});
+		let mut suffix =
+			vec![Bytes::from(format!("data: {usage}\n\n")); if send_done { 1 } else { 30 }];
+		if send_done {
+			suffix.push(Bytes::from_static(b"data: [DONE]\n\n"));
+		}
+		let body = Body::from_stream(
+			prefix
+				.into_data_stream()
+				.chain(delayed_body(suffix, Duration::from_secs(30)).into_data_stream()),
+		);
+		let bytes = translated_body(body).collect().await.unwrap().to_bytes();
+		let events = wire_events(std::str::from_utf8(&bytes).unwrap());
+		let last = events.last().unwrap();
+		if send_done {
+			assert_eq!(
+				tokio::time::Instant::now() - start,
+				Duration::from_secs(300)
+			);
+			assert_eq!(last["type"], "response.completed");
+			assert_eq!(last["response"]["usage"]["total_tokens"], 15);
+		} else {
+			assert_eq!(
+				tokio::time::Instant::now() - start,
+				Duration::from_secs(540)
+			);
+			assert_eq!(last["type"], "response.failed");
+			assert_eq!(last["response"]["error"]["code"], "upstream_timeout");
+		}
+	}
+}
+
+#[tokio::test(start_paused = true)]
+async fn upstream_comments_and_partial_frames_cannot_extend_progress_deadline() {
+	for fragment in [b": upstream heartbeat\n\n".as_slice(), b" ".as_slice()] {
+		let start = tokio::time::Instant::now();
+		let upstream = delayed_body(
+			vec![Bytes::copy_from_slice(fragment); 20],
+			Duration::from_secs(30),
+		);
+		let bytes = translated_body(upstream)
+			.collect()
+			.await
+			.unwrap()
+			.to_bytes();
+		let wire = std::str::from_utf8(&bytes).unwrap();
+		assert_eq!(
+			tokio::time::Instant::now() - start,
+			Duration::from_secs(300)
+		);
+		assert!(wire.contains(": keepalive\n\n"));
+		assert_eq!(wire_events(wire).last().unwrap()["type"], "response.failed");
+		assert_eq!(
+			wire_events(wire).last().unwrap()["response"]["error"]["code"],
+			"upstream_timeout"
+		);
+	}
+}
+
+#[tokio::test(start_paused = true)]
+async fn idle_deadline_resets_after_valid_upstream_progress() {
+	let start = tokio::time::Instant::now();
+	let dropped = Arc::new(AtomicBool::new(false));
+	let prefix = delayed_body(
+		vec![wire_chunk(
+			json!({"reasoning_content": "progress"}),
+			Value::Null,
+		)],
+		Duration::from_secs(240),
+	);
+	let body = Body::from_stream(
+		prefix
+			.into_data_stream()
+			.chain(pending_body_after(Vec::new(), dropped.clone()).into_data_stream()),
+	);
+	let bytes = translated_body(body).collect().await.unwrap().to_bytes();
+	assert_eq!(
+		tokio::time::Instant::now() - start,
+		Duration::from_secs(540)
+	);
+	assert_eq!(
+		wire_events(std::str::from_utf8(&bytes).unwrap())
+			.last()
+			.unwrap()["type"],
+		"response.failed"
+	);
+	assert!(dropped.load(Ordering::Relaxed));
+}
+
+#[tokio::test(start_paused = true)]
+async fn ordinary_text_progress_does_not_add_unnecessary_keepalives() {
+	let frames = vec![
+		wire_chunk(json!({"content": "ordinary "}), Value::Null),
+		wire_chunk(json!({"content": "text"}), json!("stop")),
+		Bytes::from_static(b"data: [DONE]\n\n"),
+	];
+	let bytes = translated_body(delayed_body(frames, Duration::from_secs(5)))
+		.collect()
+		.await
+		.unwrap()
+		.to_bytes();
+	let wire = std::str::from_utf8(&bytes).unwrap();
+	assert!(!wire.contains("keepalive"));
+	assert_eq!(
+		wire_events(wire).last().unwrap()["response"]["output"][0]["content"][0]["text"],
+		"ordinary text"
+	);
+}
+
+#[tokio::test(start_paused = true)]
+async fn heartbeat_does_not_corrupt_a_fragmented_upstream_frame() {
+	let full = wire_chunk(json!({"content": "hello"}), json!("stop"));
+	let split = full.len() / 2;
+	let frames = vec![
+		full.slice(..split),
+		full.slice(split..),
+		Bytes::from_static(b"data: [DONE]\n\n"),
+	];
+	let bytes = translated_body(delayed_body(frames, Duration::from_secs(60)))
+		.collect()
+		.await
+		.unwrap()
+		.to_bytes();
+	let wire = std::str::from_utf8(&bytes).unwrap();
+	assert!(wire.contains(": keepalive\n\n"));
+	let events = wire_events(wire);
+	assert_eq!(
+		events.last().unwrap()["response"]["output"][0]["content"][0]["text"],
+		"hello"
+	);
+}
+
+struct Dropped(Arc<AtomicBool>);
+impl Drop for Dropped {
+	fn drop(&mut self) {
+		self.0.store(true, Ordering::Relaxed);
+	}
+}
+
+fn pending_body_after(
+	prefix: Vec<Result<Bytes, std::io::Error>>,
+	dropped: Arc<AtomicBool>,
+) -> Body {
+	let guard = Dropped(dropped);
+	let pending = futures_util::stream::poll_fn(move |_| {
+		let _ = &guard;
+		std::task::Poll::Pending::<Option<Result<Bytes, std::io::Error>>>
+	});
+	Body::from_stream(futures_util::stream::iter(prefix).chain(pending))
+}
+
+#[tokio::test(start_paused = true)]
+async fn terminal_error_eof_and_cancellation_release_upstream_and_stop_heartbeats() {
+	for suffix in ["done", "malformed", "transport_error", "eof", "cancel"] {
+		let dropped = Arc::new(AtomicBool::new(false));
+		let mut frames = vec![Ok(wire_chunk(
+			json!({"tool_calls": [{"index": 0, "id": "partial", "function": {"name": "agw_tool_2", "arguments": "{\"input\":\"unfinished"}}]}),
+			Value::Null,
+		))];
+		match suffix {
+			"done" => frames.push(Ok(Bytes::from_static(b"data: [DONE]\n\n"))),
+			"malformed" => frames.push(Ok(Bytes::from_static(b"data: {broken}\n\n"))),
+			"transport_error" => frames.push(Err(std::io::Error::other("connection reset"))),
+			_ => {},
+		}
+		let upstream = if suffix == "eof" {
+			Body::from_stream(futures_util::stream::iter(frames))
+		} else {
+			pending_body_after(frames, dropped.clone())
+		};
+		let mut body = translated_body(upstream);
+		if suffix == "cancel" {
+			body.frame().await.unwrap().unwrap();
+			let heartbeat = body.frame().await.unwrap().unwrap().into_data().unwrap();
+			assert_eq!(heartbeat.as_ref(), b": keepalive\n\n");
+			drop(body);
+			assert!(dropped.load(Ordering::Relaxed));
+			continue;
+		}
+		let bytes = body.collect().await.unwrap().to_bytes();
+		let wire = std::str::from_utf8(&bytes).unwrap();
+		assert!(!wire.contains("keepalive"));
+		assert!(!wire.contains("response.output_item.done"));
+		assert_eq!(wire_events(wire).last().unwrap()["type"], "response.failed");
+		assert_eq!(
+			wire_events(wire).last().unwrap()["response"]["error"]["code"],
+			"upstream_protocol_error"
+		);
+		assert!(suffix == "eof" || dropped.load(Ordering::Relaxed));
+	}
+	let dropped = Arc::new(AtomicBool::new(false));
+	let body = pending_body_after(
+		vec![
+			Ok(wire_chunk(json!({"content": "done"}), json!("stop"))),
+			Ok(Bytes::from_static(b"data: [DONE]\n\n")),
+		],
+		dropped.clone(),
+	);
+	let mut body = translated_body(body);
+	while let Some(frame) = body.frame().await {
+		let bytes = frame.unwrap().into_data().unwrap();
+		if std::str::from_utf8(&bytes)
+			.unwrap()
+			.contains("response.completed")
+		{
+			assert!(
+				dropped.load(Ordering::Relaxed),
+				"release upstream with terminal batch"
+			);
+		}
+	}
+}
+
+#[tokio::test]
+async fn all_parallel_tools_are_validated_before_any_executable_done() {
+	for bad in ["{\"cmd\":", "{\"input\":42}"] {
+		let name = if bad.contains("input") {
+			"agw_tool_2"
+		} else {
+			"agw_tool_3"
+		};
+		let events = stream(vec![chunk(json!({"tool_calls": [
+			{"index": 0, "id": "valid", "function": {"name": "agw_tool_3", "arguments": "{\"cmd\":\"pwd\"}"}},
+			{"index": 1, "id": "invalid", "function": {"name": name, "arguments": bad}}
+		]}), json!("tool_calls"))], true, 4096).await;
+		assert_eq!(events.last().unwrap()["type"], "response.failed");
+		assert!(
+			!events
+				.iter()
+				.any(|event| event["type"] == "response.output_item.done")
+		);
+	}
+	for finish in ["length", "content_filter"] {
+		let events = stream(vec![chunk(json!({"tool_calls": [{"index": 0, "id": "valid_but_not_completed", "function": {"name": "agw_tool_3", "arguments": "{\"cmd\":\"pwd\"}"}}]}), json!(finish))], true, 4096).await;
+		assert!(
+			!events
+				.iter()
+				.any(|event| event["type"] == "response.output_item.done")
+		);
+		assert_ne!(events.last().unwrap()["type"], "response.completed");
+	}
 }
 
 #[test]

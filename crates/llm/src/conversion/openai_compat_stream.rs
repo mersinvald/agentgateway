@@ -1,5 +1,7 @@
 use std::collections::BTreeMap;
-use std::time::Instant;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::{Duration, Instant};
 
 use agent_core::strng;
 use axum_core::body::Body;
@@ -10,6 +12,12 @@ use super::ResponseToolMap;
 use crate::parse::sse::SseJsonEvent;
 use crate::types::completions::typed as completions;
 use crate::{LogContentFields, StreamingUsageGuard, parse, types};
+
+// Buffered reasoning/tools must not trip clients' socket idle timers. Bound the
+// gap between upstream progress events to five minutes. Empty data events,
+// upstream comments, and downstream keepalives do not reset this timer.
+const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(15);
+const UPSTREAM_IDLE_TIMEOUT: Duration = Duration::from_secs(300);
 
 #[derive(Default)]
 struct ToolCall {
@@ -67,12 +75,16 @@ impl Stream {
 	}
 
 	fn fail(&mut self, events: &mut Vec<(&'static str, Value)>, message: &str) {
+		self.fail_with_code(events, "upstream_protocol_error", message);
+	}
+
+	fn fail_with_code(&mut self, events: &mut Vec<(&'static str, Value)>, code: &str, message: &str) {
 		if self.finished {
 			return;
 		}
 		self.finished = true;
 		let mut response = self.response("failed");
-		response["error"] = json!({"code": "upstream_protocol_error", "message": message});
+		response["error"] = json!({"code": code, "message": message});
 		self.event(events, "response.failed", json!({"response": response}));
 	}
 
@@ -225,7 +237,8 @@ impl Stream {
 		}
 		// Buffer tool arguments until complete so split JSON escapes, names and parallel calls
 		// can be restored without exposing a JSON wrapper as executable free-form input.
-		let mut logged_tools = Vec::new();
+		// Validate the entire batch before any executable tool item is emitted.
+		let mut validated_tools = Vec::new();
 		for (index, tool) in std::mem::take(&mut self.tools) {
 			// Codex executes output_item.done tool calls. A truncated/filtered turn
 			// must not dispatch a tool, even if its partial arguments happen to parse.
@@ -236,12 +249,20 @@ impl Stream {
 				self.fail(events, "upstream tool call is missing its id or name");
 				return;
 			}
+			if !tool.arguments.is_empty() && serde_json::from_str::<Value>(&tool.arguments).is_err() {
+				self.fail(events, "invalid JSON arguments for a tool call");
+				return;
+			}
 			let mut item = json!({"type": "function_call", "id": tool.id, "call_id": tool.id,
 				"name": tool.name, "arguments": tool.arguments, "status": "completed"});
 			if self.tool_map.restore_call(&mut item).is_err() {
 				self.fail(events, "invalid JSON input for a custom tool call");
 				return;
 			}
+			validated_tools.push((index, tool, item));
+		}
+		let mut logged_tools = Vec::new();
+		for (index, tool, item) in validated_tools {
 			let custom = item["type"] == "custom_tool_call";
 			let field = if custom { "input" } else { "arguments" };
 			let mut added = item.clone();
@@ -357,6 +378,9 @@ pub(super) fn translate(
 	log_content: LogContentFields,
 	tool_map: ResponseToolMap,
 ) -> Body {
+	let terminal = Arc::new(AtomicBool::new(false));
+	let ended = terminal.clone();
+	let (body, progress) = parse::sse_liveness::upstream_idle_timeout(body, UPSTREAM_IDLE_TIMEOUT);
 	let mut stream = Stream {
 		id: format!("resp_{:016x}", rand::rng().random::<u64>()),
 		message_id: format!("msg_{:016x}", rand::rng().random::<u64>()),
@@ -377,7 +401,7 @@ pub(super) fn translate(
 		log,
 		log_content,
 	};
-	parse::sse::json_transform_multi::<completions::StreamResponse, Value, _>(
+	let body = parse::sse::json_transform_multi::<completions::StreamResponse, Value, _>(
 		body,
 		buffer_limit,
 		move |event| {
@@ -386,13 +410,32 @@ pub(super) fn translate(
 				return events;
 			}
 			match event {
-				SseJsonEvent::Data(Ok(chunk)) => stream.chunk(chunk, &mut events),
+				SseJsonEvent::Data(Ok(chunk)) => {
+					let buffered = stream.buffered;
+					let stopped = stream.stop.is_some();
+					stream.chunk(chunk, &mut events);
+					// Metadata, usage-only chunks, and empty deltas are not model
+					// progress. Count new content/tool bytes or the first finish reason.
+					if stream.buffered > buffered || (!stopped && stream.stop.is_some()) {
+						progress.record();
+					}
+				},
 				SseJsonEvent::Done | SseJsonEvent::Eof => stream.finish(&mut events),
+				SseJsonEvent::Error if progress.timed_out() => stream.fail_with_code(
+					&mut events,
+					"upstream_timeout",
+					&format!(
+						"upstream SSE stream made no progress for {} seconds",
+						UPSTREAM_IDLE_TIMEOUT.as_secs()
+					),
+				),
 				SseJsonEvent::Data(Err(_)) | SseJsonEvent::Error => {
 					stream.fail(&mut events, "invalid or interrupted upstream event stream")
 				},
 			}
+			ended.store(stream.finished, Ordering::Relaxed);
 			events
 		},
-	)
+	);
+	parse::sse_liveness::keepalive(body, KEEPALIVE_INTERVAL, terminal)
 }
