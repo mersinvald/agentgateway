@@ -25,7 +25,20 @@ provider:
 
 ## Codex configuration
 
-Merge the settings in `config.toml` into the user-level `~/.codex/config.toml`.
+This example was verified for an individual Kimi CLI session. It is **not** a
+working mixed-model coordinator configuration for the desktop app. A Kimi-only
+global catalog can replace the model selection in existing OpenAI tasks while
+their provider remains OpenAI, causing the ChatGPT-account model error.
+
+The current Codex V2 subagent protocol also sends the task in an `agent_message`
+containing `encrypted_content`. The captured cross-model request contained no
+plaintext task for Kimi. Ordinary Responses-to-Completions conversion cannot
+recover that assignment. The mixed-model harness setup is documented under
+[`../opencode-coordinator`](../opencode-coordinator).
+
+For a standalone CLI session, save the settings in `~/.codex/kimi.config.toml`
+and launch `codex --profile kimi`. Avoid replacing the desktop app's global
+model and catalog with this Kimi-only example.
 Set `base_url` to the reachable Gateway URL ending in `/v1`, set
 `model_catalog_json` to this directory's absolute `models.json` path, and make
 `AGENTGATEWAY_API_KEY` available to the Codex process. Use a Gateway client key;
@@ -36,9 +49,6 @@ The supplied model catalog enables Codex's native shell and free-form
 OpenAI `/v1/models` response as its richer model catalog. The 65,536-token
 context is a conservative client limit, not the provider's advertised maximum.
 
-Restart the desktop app and start a new local task after changing its default
-provider. Existing tasks retain their provider. To test separately from the
-app's defaults, use `~/.codex/kimi.config.toml` and `codex --profile kimi`.
 Profiles are separate files in current Codex, not `[profiles.kimi]` tables.
 
 The settings use HTTP/SSE and client-managed conversation history. Provider-side

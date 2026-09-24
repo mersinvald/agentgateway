@@ -458,7 +458,7 @@ impl HttpTokenEndpoint {
 	}
 
 	#[cfg(test)]
-	fn for_test(issuer: Url) -> Self {
+	pub(crate) fn for_test(issuer: Url) -> Self {
 		Self {
 			client: reqwest::Client::builder()
 				.redirect(reqwest::redirect::Policy::none())
@@ -754,6 +754,17 @@ impl Manager {
 			Arc::new(HttpTokenEndpoint::new()),
 			Arc::new(MemoryCredentialStore::default()),
 		)
+	}
+
+	/// A remote rejection overrides local expiry. Ignore delayed rejections of
+	/// an older token so they cannot invalidate a concurrent replacement.
+	pub async fn reject_access_token(&self, rejected: &SecretString) {
+		let mut state = self.state.lock().await;
+		if let Some(credential) = state.credential.as_mut()
+			&& credential.access_token.expose_secret() == rejected.expose_secret()
+		{
+			credential.expires_at = SystemTime::UNIX_EPOCH;
+		}
 	}
 
 	/// Returns a valid credential, refreshing it at most once for concurrent callers.
@@ -1188,6 +1199,31 @@ mod tests {
 		let (left, right) = tokio::join!(manager.credential(), manager.credential());
 		assert!(left.is_ok());
 		assert!(right.is_ok());
+		assert_eq!(endpoint.refreshes.load(Ordering::Relaxed), 1);
+	}
+
+	#[tokio::test]
+	async fn rejected_unexpired_token_refreshes_once_and_ignores_late_rejections() {
+		let endpoint = Arc::new(MockEndpoint::default());
+		let store = Arc::new(MemoryCredentialStore::default());
+		let old = SecretString::from("rejected-token");
+		store
+			.replace(Credential {
+				access_token: old.clone(),
+				refresh_token: SecretString::from("refresh"),
+				expires_at: SystemTime::now() + Duration::from_secs(3600),
+				account_id: None,
+				residency: None,
+			})
+			.await
+			.unwrap();
+		let manager = Manager::new(endpoint.clone(), store);
+		manager.credential().await.unwrap();
+		manager.reject_access_token(&old).await;
+		let (left, right) = tokio::join!(manager.credential(), manager.credential());
+		assert!(left.is_ok() && right.is_ok());
+		manager.reject_access_token(&old).await;
+		manager.credential().await.unwrap();
 		assert_eq!(endpoint.refreshes.load(Ordering::Relaxed), 1);
 	}
 

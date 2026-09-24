@@ -37,6 +37,10 @@ struct Stream {
 	saw_token: bool,
 	text: String,
 	reasoning: String,
+	message_output_index: Option<usize>,
+	reasoning_output_index: Option<usize>,
+	next_output_index: usize,
+	reasoning_item_id: String,
 	tools: BTreeMap<u32, ToolCall>,
 	tool_map: ResponseToolMap,
 	stop: Option<completions::FinishReason>,
@@ -88,6 +92,58 @@ impl Stream {
 		self.event(events, "response.failed", json!({"response": response}));
 	}
 
+	fn output_index(&mut self) -> usize {
+		let index = self.next_output_index;
+		self.next_output_index += 1;
+		index
+	}
+
+	fn start_reasoning(&mut self, events: &mut Vec<(&'static str, Value)>) -> usize {
+		if let Some(index) = self.reasoning_output_index {
+			return index;
+		}
+		let output_index = self.output_index();
+		self.reasoning_output_index = Some(output_index);
+		// Open Responses consumers use the summary-part lifecycle to surface
+		// reasoning while the model is still thinking. Keep the item open until
+		// the upstream finish reason; tool arguments remain buffered separately.
+		self.event(
+			events,
+			"response.output_item.added",
+			json!({"output_index": output_index, "item": {
+				"type": "reasoning", "id": self.reasoning_item_id, "summary": [], "content": [],
+				"status": "in_progress"
+			}}),
+		);
+		self.event(
+			events,
+			"response.reasoning_summary_part.added",
+			json!({"item_id": self.reasoning_item_id, "output_index": output_index,
+				"summary_index": 0, "part": {"type": "summary_text", "text": ""}}),
+		);
+		output_index
+	}
+
+	fn start_message(&mut self, events: &mut Vec<(&'static str, Value)>) -> usize {
+		if let Some(index) = self.message_output_index {
+			return index;
+		}
+		let output_index = self.output_index();
+		self.message_output_index = Some(output_index);
+		self.event(events, "response.output_item.added", json!({"output_index": output_index, "item": {
+			"type": "message", "id": self.message_id, "role": "assistant", "status": "in_progress", "content": []
+		}}));
+		self.event(
+			events,
+			"response.content_part.added",
+			json!({
+				"item_id": self.message_id, "output_index": output_index, "content_index": 0,
+				"part": {"type": "output_text", "text": "", "annotations": []}
+			}),
+		);
+		output_index
+	}
+
 	fn chunk(&mut self, chunk: completions::StreamResponse, events: &mut Vec<(&'static str, Value)>) {
 		if !self.created {
 			self.created = true;
@@ -115,6 +171,11 @@ impl Stream {
 		let has_token = choice.delta.content.as_ref().is_some_and(|s| !s.is_empty())
 			|| choice
 				.delta
+				.reasoning_content
+				.as_ref()
+				.is_some_and(|s| !s.is_empty())
+			|| choice
+				.delta
 				.tool_calls
 				.as_ref()
 				.is_some_and(|calls| !calls.is_empty());
@@ -126,9 +187,10 @@ impl Stream {
 		}
 		let content = choice.delta.content.unwrap_or_default();
 		self.buffered = self.buffered.saturating_add(content.len());
-		if let Some(reasoning) = choice.delta.reasoning_content {
-			self.buffered = self.buffered.saturating_add(reasoning.len());
-			self.reasoning.push_str(&reasoning);
+		let reasoning_delta = choice.delta.reasoning_content.unwrap_or_default();
+		if !reasoning_delta.is_empty() {
+			self.buffered = self.buffered.saturating_add(reasoning_delta.len());
+			self.reasoning.push_str(&reasoning_delta);
 		}
 		for tool in choice.delta.tool_calls.into_iter().flatten() {
 			let entry = self.tools.entry(tool.index).or_default();
@@ -154,26 +216,23 @@ impl Stream {
 			);
 			return;
 		}
+		if !reasoning_delta.is_empty() {
+			let output_index = self.start_reasoning(events);
+			self.event(
+				events,
+				"response.reasoning_summary_text.delta",
+				json!({"item_id": self.reasoning_item_id, "output_index": output_index,
+					"summary_index": 0, "delta": reasoning_delta}),
+			);
+		}
 		if !content.is_empty() {
-			if self.text.is_empty() {
-				self.event(events, "response.output_item.added", json!({"output_index": 0, "item": {
-					"type": "message", "id": self.message_id, "role": "assistant", "status": "in_progress", "content": []
-				}}));
-				self.event(
-					events,
-					"response.content_part.added",
-					json!({
-						"item_id": self.message_id, "output_index": 0, "content_index": 0,
-						"part": {"type": "output_text", "text": "", "annotations": []}
-					}),
-				);
-			}
+			let output_index = self.start_message(events);
 			self.text.push_str(&content);
 			self.event(
 				events,
 				"response.output_text.delta",
 				json!({
-					"item_id": self.message_id, "output_index": 0, "content_index": 0, "delta": content
+					"item_id": self.message_id, "output_index": output_index, "content_index": 0, "delta": content
 				}),
 			);
 		}
@@ -192,6 +251,9 @@ impl Stream {
 		};
 		let mut outputs = Vec::new();
 		if !self.text.is_empty() {
+			let output_index = self
+				.message_output_index
+				.expect("message output was started with text");
 			let part = json!({"type": "output_text", "text": self.text, "annotations": []});
 			let item = json!({"type": "message", "id": self.message_id,
 				"role": "assistant", "status": if status == "completed" { "completed" } else { "incomplete" }, "content": [part]});
@@ -199,41 +261,52 @@ impl Stream {
 				events,
 				"response.output_text.done",
 				json!({
-					"item_id": self.message_id, "output_index": 0, "content_index": 0, "text": self.text
+					"item_id": self.message_id, "output_index": output_index, "content_index": 0, "text": self.text
 				}),
 			);
 			self.event(
 				events,
 				"response.content_part.done",
 				json!({
-					"item_id": self.message_id, "output_index": 0, "content_index": 0, "part": part
+					"item_id": self.message_id, "output_index": output_index, "content_index": 0, "part": part
 				}),
 			);
 			self.event(
 				events,
 				"response.output_item.done",
-				json!({"output_index": 0, "item": item}),
+				json!({"output_index": output_index, "item": item}),
 			);
-			outputs.push(item);
+			outputs.push((output_index, item));
 		}
 		if !self.reasoning.is_empty() {
-			let item = json!({"type": "reasoning", "id": format!("rs_{}", self.id), "summary": [],
+			let output_index = self
+				.reasoning_output_index
+				.expect("reasoning output was started with content");
+			// `summary` is the streaming Responses representation. Keep the
+			// `reasoning_text` content copy for replay into a later Chat
+			// Completions request, which is how this compatibility route preserves
+			// Kimi's reasoning across tool turns.
+			let item = json!({"type": "reasoning", "id": self.reasoning_item_id, "summary": [{"type": "summary_text", "text": self.reasoning}],
 				"content": [{"type": "reasoning_text", "text": self.reasoning}],
 				"status": if status == "completed" { "completed" } else { "incomplete" }});
-			let mut added = item.clone();
-			added["content"] = json!([]);
-			added["status"] = json!("in_progress");
 			self.event(
 				events,
-				"response.output_item.added",
-				json!({"output_index": outputs.len(), "item": added}),
+				"response.reasoning_summary_text.done",
+				json!({"item_id": self.reasoning_item_id, "output_index": output_index,
+					"summary_index": 0, "text": self.reasoning}),
+			);
+			self.event(
+				events,
+				"response.reasoning_summary_part.done",
+				json!({"item_id": self.reasoning_item_id, "output_index": output_index, "summary_index": 0,
+					"part": {"type": "summary_text", "text": self.reasoning}}),
 			);
 			self.event(
 				events,
 				"response.output_item.done",
-				json!({"output_index": outputs.len(), "item": item}),
+				json!({"output_index": output_index, "item": item}),
 			);
-			outputs.push(item);
+			outputs.push((output_index, item));
 		}
 		// Buffer tool arguments until complete so split JSON escapes, names and parallel calls
 		// can be restored without exposing a JSON wrapper as executable free-form input.
@@ -268,7 +341,7 @@ impl Stream {
 			let mut added = item.clone();
 			added[field] = json!("");
 			added["status"] = json!("in_progress");
-			let output_index = outputs.len();
+			let output_index = self.output_index();
 			self.event(
 				events,
 				"response.output_item.added",
@@ -306,10 +379,15 @@ impl Stream {
 				item["name"].as_str().map(str::to_owned),
 				item[field].as_str().unwrap_or_default().to_owned(),
 			));
-			outputs.push(item);
+			outputs.push((output_index, item));
 		}
+		outputs.sort_by_key(|(index, _)| *index);
+		let output_values = outputs
+			.into_iter()
+			.map(|(_, item)| item)
+			.collect::<Vec<_>>();
 		let mut response = self.response(status);
-		response["output"] = json!(outputs);
+		response["output"] = json!(output_values);
 		if status == "incomplete" {
 			response["incomplete_details"] = json!({"reason": "max_output_tokens"});
 		}
@@ -392,6 +470,10 @@ pub(super) fn translate(
 		saw_token: false,
 		text: String::new(),
 		reasoning: String::new(),
+		message_output_index: None,
+		reasoning_output_index: None,
+		next_output_index: 0,
+		reasoning_item_id: format!("rs_{:016x}", rand::rng().random::<u64>()),
 		tools: BTreeMap::new(),
 		tool_map,
 		stop: None,
@@ -438,4 +520,91 @@ pub(super) fn translate(
 		},
 	);
 	parse::sse_liveness::keepalive(body, KEEPALIVE_INTERVAL, terminal)
+}
+
+#[cfg(test)]
+mod tests {
+	use axum_core::body::Body;
+	use http_body_util::BodyExt;
+	use serde_json::Value;
+
+	use super::*;
+
+	fn chunk(delta: Value, finish: Value) -> Value {
+		json!({"id": "chatcmpl_test", "object": "chat.completion.chunk", "created": 1,
+			"model": "moonshotai/Kimi-K3", "choices": [{"index": 0, "delta": delta, "finish_reason": finish}]})
+	}
+
+	fn events(wire: &str) -> Vec<Value> {
+		wire
+			.lines()
+			.filter_map(|line| line.strip_prefix("data: "))
+			.filter(|data| *data != "[DONE]")
+			.map(|data| serde_json::from_str(data).expect("valid translated SSE event"))
+			.collect()
+	}
+
+	#[tokio::test]
+	async fn reasoning_content_is_forwarded_incrementally_as_responses_events() {
+		let input = [
+			chunk(json!({"reasoning_content": "Think "}), Value::Null),
+			chunk(json!({"reasoning_content": "carefully."}), Value::Null),
+			chunk(json!({"content": "Answer"}), json!("stop")),
+		]
+		.into_iter()
+		.map(|chunk| format!("data: {chunk}\n\n"))
+		.chain(std::iter::once("data: [DONE]\n\n".to_string()))
+		.collect::<String>();
+		let body = translate(
+			Body::from(input),
+			64 * 1024,
+			Default::default(),
+			Default::default(),
+			ResponseToolMap::default(),
+		);
+		let wire = String::from_utf8(body.collect().await.unwrap().to_bytes().to_vec()).unwrap();
+		let events = events(&wire);
+		let reasoning_deltas: Vec<_> = events
+			.iter()
+			.filter(|event| event["type"] == "response.reasoning_summary_text.delta")
+			.collect();
+		assert_eq!(
+			reasoning_deltas
+				.iter()
+				.map(|event| event["delta"].as_str().unwrap())
+				.collect::<String>(),
+			"Think carefully."
+		);
+		assert!(
+			reasoning_deltas
+				.iter()
+				.all(|event| event["item_id"].as_str().is_some())
+		);
+		assert!(
+			reasoning_deltas
+				.iter()
+				.all(|event| event["output_index"] == 0)
+		);
+		assert!(
+			events
+				.iter()
+				.position(|event| event["type"] == "response.reasoning_summary_text.delta")
+				.unwrap()
+				< events
+					.iter()
+					.position(|event| event["type"] == "response.completed")
+					.unwrap()
+		);
+		let completed = events.last().expect("terminal response event");
+		assert_eq!(completed["type"], "response.completed");
+		assert_eq!(completed["response"]["output"][0]["type"], "reasoning");
+		assert_eq!(
+			completed["response"]["output"][0]["summary"][0]["text"],
+			"Think carefully."
+		);
+		assert_eq!(
+			completed["response"]["output"][1]["content"][0]["text"],
+			"Answer"
+		);
+	}
 }

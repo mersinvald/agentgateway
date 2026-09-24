@@ -3573,13 +3573,6 @@ async fn fetch_default_codex_catalog(
 	inputs: &ProxyInputs,
 	etag: Option<&str>,
 ) -> Result<CodexCatalogFetch, ProxyResponse> {
-	use secrecy::ExposeSecret;
-
-	let credential = inputs
-		.codex_oauth
-		.credential()
-		.await
-		.map_err(|_| codex_catalog_failure("credential"))?;
 	let client = reqwest::Client::builder()
 		.redirect(reqwest::redirect::Policy::none())
 		.local_address(Some(std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED)))
@@ -3592,29 +3585,7 @@ async fn fetch_default_codex_catalog(
 		agent_llm::codex_subscription::MODELS_PATH,
 		CODEX_CATALOG_CLIENT_VERSION,
 	);
-	let mut request = client
-		.get(url)
-		.header(reqwest::header::ACCEPT, "application/json")
-		.header(reqwest::header::USER_AGENT, CODEX_CATALOG_USER_AGENT)
-		.header("originator", "codex_cli_rs")
-		.bearer_auth(credential.access_token.expose_secret());
-	if let Some(account_id) = credential.account_id {
-		request = request.header("chatgpt-account-id", account_id);
-	}
-	if let Some(residency) = credential.residency {
-		request = request.header("x-openai-internal-codex-residency", residency);
-	}
-	if let Some(etag) = etag {
-		request = request.header(reqwest::header::IF_NONE_MATCH, etag);
-	}
-	let mut response = request.send().await.map_err(|error| {
-		warn!(
-			timeout = error.is_timeout(),
-			connect = error.is_connect(),
-			"Codex catalog transport failed"
-		);
-		codex_catalog_failure("transport")
-	})?;
+	let mut response = request_codex_catalog(&inputs.codex_oauth, &client, &url, etag).await?;
 	if response.status() == reqwest::StatusCode::NOT_MODIFIED {
 		return Ok(CodexCatalogFetch::NotModified);
 	}
@@ -3663,6 +3634,56 @@ async fn fetch_default_codex_catalog(
 		catalog,
 		etag: response_etag,
 	})
+}
+
+async fn request_codex_catalog(
+	manager: &llm::codex_oauth::Manager,
+	client: &reqwest::Client,
+	url: &str,
+	etag: Option<&str>,
+) -> Result<reqwest::Response, ProxyResponse> {
+	use secrecy::ExposeSecret;
+
+	for attempt in 0..=1 {
+		let credential = manager
+			.credential()
+			.await
+			.map_err(|_| codex_catalog_failure("credential"))?;
+		let mut request = client
+			.get(url)
+			.header(reqwest::header::ACCEPT, "application/json")
+			.header(reqwest::header::USER_AGENT, CODEX_CATALOG_USER_AGENT)
+			.header("originator", "codex_cli_rs")
+			.bearer_auth(credential.access_token.expose_secret());
+		if let Some(account_id) = &credential.account_id {
+			request = request.header("chatgpt-account-id", account_id);
+		}
+		if let Some(residency) = &credential.residency {
+			request = request.header("x-openai-internal-codex-residency", residency);
+		}
+		if attempt == 0
+			&& let Some(etag) = etag
+		{
+			request = request.header(reqwest::header::IF_NONE_MATCH, etag);
+		}
+		let response = request.send().await.map_err(|error| {
+			warn!(
+				timeout = error.is_timeout(),
+				connect = error.is_connect(),
+				"Codex catalog transport failed"
+			);
+			codex_catalog_failure("transport")
+		})?;
+		if response.status() == reqwest::StatusCode::UNAUTHORIZED {
+			manager.reject_access_token(&credential.access_token).await;
+			if attempt == 0 {
+				debug!("refreshing Codex credential after catalog rejected it");
+				continue;
+			}
+		}
+		return Ok(response);
+	}
+	unreachable!("catalog authentication retries are bounded")
 }
 
 fn codex_catalog_failure(stage: &'static str) -> ProxyResponse {
@@ -4297,6 +4318,122 @@ mod tests {
 			spiffe_backend_alpns(&spiffe_tls, None),
 			vec![b"h2".to_vec()]
 		);
+	}
+
+	#[rstest::rstest]
+	#[case(200, 200)]
+	#[case(200, 401)]
+	#[case(400, 0)]
+	#[tokio::test]
+	async fn codex_catalog_refreshes_rejected_credentials(
+		#[case] token_status: u16,
+		#[case] retry_status: u16,
+	) {
+		use crate::llm::codex_oauth::{
+			AuthorizationState, Credential, CredentialStore, HttpTokenEndpoint, Manager,
+			MemoryCredentialStore,
+		};
+		use base64::Engine;
+		use secrecy::{ExposeSecret, SecretString};
+		use std::time::{Duration, SystemTime};
+		use wiremock::matchers::{header, method, path};
+
+		let server = wiremock::MockServer::start().await;
+		let payload = base64::engine::general_purpose::URL_SAFE_NO_PAD
+			.encode(br#"{"chatgpt_account_id":"new-account"}"#);
+		let renewed = format!("header.{payload}.signature");
+		Mock::given(method("GET"))
+			.and(path("/models"))
+			.and(header("authorization", "Bearer old-token"))
+			.respond_with(ResponseTemplate::new(401))
+			.expect(1)
+			.mount(&server)
+			.await;
+		Mock::given(method("POST"))
+			.and(path("/oauth/token"))
+			.respond_with(ResponseTemplate::new(token_status).set_body_json(json!({
+				"access_token": renewed, "refresh_token": "new-refresh", "expires_in": 3600,
+			})))
+			.expect(1)
+			.mount(&server)
+			.await;
+		if retry_status != 0 {
+			Mock::given(method("GET"))
+				.and(path("/models"))
+				.and(header("authorization", format!("Bearer {renewed}")))
+				.and(header("chatgpt-account-id", "new-account"))
+				.respond_with(ResponseTemplate::new(retry_status))
+				.expect(1)
+				.mount(&server)
+				.await;
+		}
+		Mock::given(method("POST"))
+			.and(path("/api/accounts/deviceauth/usercode"))
+			.respond_with(ResponseTemplate::new(200).set_body_json(json!({
+				"device_auth_id": "device", "user_code": "NEW-CODE", "expires_in": 900,
+			})))
+			.mount(&server)
+			.await;
+		let store = Arc::new(MemoryCredentialStore::default());
+		store
+			.replace(Credential {
+				access_token: SecretString::from("old-token"),
+				refresh_token: SecretString::from("old-refresh"),
+				expires_at: SystemTime::now() + Duration::from_secs(3600),
+				account_id: Some("old-account".into()),
+				residency: None,
+			})
+			.await
+			.unwrap();
+		let manager = Manager::new(
+			Arc::new(HttpTokenEndpoint::for_test(server.uri().parse().unwrap())),
+			store.clone(),
+		);
+		let result = super::request_codex_catalog(
+			&manager,
+			&reqwest::Client::new(),
+			&format!("{}/models", server.uri()),
+			Some("old-etag"),
+		)
+		.await;
+		if retry_status == 0 {
+			assert!(result.is_err());
+		} else {
+			assert_eq!(result.unwrap().status().as_u16(), retry_status);
+			assert_eq!(
+				store
+					.load()
+					.await
+					.unwrap()
+					.unwrap()
+					.refresh_token
+					.expose_secret(),
+				"new-refresh"
+			);
+		}
+		if retry_status == 200 {
+			assert_eq!(
+				manager.start_or_poll().await.unwrap(),
+				AuthorizationState::Authorized
+			);
+		} else {
+			assert!(matches!(
+				manager.start_or_poll().await.unwrap(),
+				AuthorizationState::Pending { .. }
+			));
+		}
+		let requests = server.received_requests().await.unwrap();
+		let catalog_requests: Vec<_> = requests
+			.iter()
+			.filter(|r| r.url.path() == "/models")
+			.collect();
+		assert_eq!(
+			catalog_requests.len(),
+			if retry_status == 0 { 1 } else { 2 }
+		);
+		if let Some(retry) = catalog_requests.get(1) {
+			assert!(!retry.headers.contains_key("if-none-match"));
+		}
 	}
 
 	#[test]
