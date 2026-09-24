@@ -199,13 +199,14 @@ async fn silent_upstream_fails_after_five_minutes_despite_keepalives() {
 	let events = wire_events(wire);
 	assert_eq!(events.len(), 1);
 	assert_eq!(events[0]["type"], "response.failed");
+	assert_eq!(events[0]["response"]["error"]["code"], "upstream_timeout");
 	assert_eq!(
-		events[0]["response"]["error"],
-		json!({
-			"code": "upstream_timeout",
-			"message": "upstream SSE stream made no progress for 300 seconds"
-		})
+		events[0]["response"]["error"]["message"],
+		"upstream SSE stream made no progress for 300 seconds"
 	);
+	assert_eq!(events[0]["response"]["error"]["retryable"], true);
+	assert_eq!(events[0]["response"]["error"]["recovery"], "retry_request");
+	assert_eq!(events[0]["response"]["error"]["partial_output"], false);
 }
 
 #[tokio::test(start_paused = true)]
@@ -627,6 +628,35 @@ async fn stream_requires_finish_reason_and_preserves_text_without_logging() {
 		assert_eq!(events.last().unwrap()["type"], "response.failed");
 		assert!(!events.iter().any(|e| e["type"] == "response.completed"));
 	}
+}
+
+#[tokio::test]
+async fn recoverable_failures_preserve_partial_output_and_recovery_metadata() {
+	let events = stream(
+		vec![chunk(
+			json!({"reasoning_content": "Still thinking"}),
+			Value::Null,
+		)],
+		false,
+		4096,
+	)
+	.await;
+	let failure = events.last().unwrap();
+	assert_eq!(failure["type"], "response.failed");
+	assert_eq!(
+		failure["response"]["error"]["code"],
+		"upstream_protocol_error"
+	);
+	assert_eq!(failure["response"]["error"]["retryable"], true);
+	assert_eq!(
+		failure["response"]["error"]["recovery"],
+		"continue_from_partial_output"
+	);
+	assert_eq!(failure["response"]["error"]["partial_output"], true);
+	assert_eq!(
+		failure["response"]["output"][0]["content"][0]["text"],
+		"Still thinking"
+	);
 }
 
 #[tokio::test]

@@ -82,13 +82,53 @@ impl Stream {
 		self.fail_with_code(events, "upstream_protocol_error", message);
 	}
 
+	fn partial_output(&self) -> Vec<Value> {
+		let mut output = Vec::new();
+		if !self.text.is_empty() {
+			output.push(json!({
+				"type": "message",
+				"id": self.message_id,
+				"role": "assistant",
+				"status": "incomplete",
+				"content": [{"type": "output_text", "text": self.text, "annotations": []}],
+			}));
+		}
+		if !self.reasoning.is_empty() {
+			output.push(json!({
+				"type": "reasoning",
+				"id": self.reasoning_item_id,
+				"status": "incomplete",
+				"summary": [{"type": "summary_text", "text": self.reasoning}],
+				"content": [{"type": "reasoning_text", "text": self.reasoning}],
+			}));
+		}
+		output
+	}
+
 	fn fail_with_code(&mut self, events: &mut Vec<(&'static str, Value)>, code: &str, message: &str) {
 		if self.finished {
 			return;
 		}
 		self.finished = true;
 		let mut response = self.response("failed");
-		response["error"] = json!({"code": code, "message": message});
+		let output = self.partial_output();
+		let partial_output = !output.is_empty() || !self.tools.is_empty();
+		if !output.is_empty() {
+			response["output"] = json!(output);
+			response["incomplete_details"] = json!({"reason": "upstream_error"});
+		}
+		// A stream cannot be transparently replayed after output has reached the
+		// client: repeating it could execute a tool twice. Expose enough stable
+		// recovery metadata for the caller to resume the same task from durable
+		// state instead. The retry is intentionally delegated to the agent.
+		response["error"] = json!({
+			"code": code,
+			"message": message,
+			"retryable": true,
+			"recovery": if partial_output { "continue_from_partial_output" } else { "retry_request" },
+			"partial_output": partial_output,
+			"last_sequence_number": self.sequence,
+		});
 		self.event(events, "response.failed", json!({"response": response}));
 	}
 
