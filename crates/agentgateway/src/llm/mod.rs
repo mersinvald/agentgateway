@@ -65,6 +65,173 @@ fn normalize_sse_response_headers(mut resp: Response) -> Response {
 	resp
 }
 
+pin_project_lite::pin_project! {
+	struct PrefixFramesBody {
+		prefix: std::collections::VecDeque<http_body::Frame<bytes::Bytes>>,
+		#[pin]
+		inner: Body,
+	}
+}
+
+impl http_body::Body for PrefixFramesBody {
+	type Data = bytes::Bytes;
+	type Error = crate::http::Error;
+
+	fn poll_frame(
+		self: std::pin::Pin<&mut Self>,
+		cx: &mut std::task::Context<'_>,
+	) -> std::task::Poll<Option<Result<http_body::Frame<Self::Data>, Self::Error>>> {
+		let this = self.project();
+		if let Some(frame) = this.prefix.pop_front() {
+			return std::task::Poll::Ready(Some(Ok(frame)));
+		}
+		this.inner.poll_frame(cx)
+	}
+
+	fn is_end_stream(&self) -> bool {
+		self.prefix.is_empty() && self.inner.is_end_stream()
+	}
+
+	fn size_hint(&self) -> http_body::SizeHint {
+		let prefix_bytes: u64 = self
+			.prefix
+			.iter()
+			.map(|frame| frame.data_ref().map_or(0, |bytes| bytes.len()) as u64)
+			.sum();
+		let mut hint = self.inner.size_hint();
+		if let Some(upper) = hint.upper() {
+			hint.set_upper(upper.saturating_add(prefix_bytes));
+		}
+		hint.set_lower(hint.lower().saturating_add(prefix_bytes));
+		hint
+	}
+}
+
+/// Read only the initial Codex SSE prefix, until an output event proves the stream has started
+/// or a retryable overload event arrives. This lets the proxy retry an HTTP 200 semantic error
+/// without replaying any response text or tool call that a client may already have acted on.
+async fn inspect_codex_overload_prefix(resp: Response) -> Result<(Response, bool), AIError> {
+	use bytes::BytesMut;
+	use headers::{ContentEncoding, HeaderMapExt};
+	use http_body_util::BodyExt;
+	use std::time::Duration;
+	use tokio_util::codec::Decoder;
+
+	if !resp
+		.headers()
+		.get(header::CONTENT_TYPE)
+		.and_then(|v| v.to_str().ok())
+		.is_some_and(|v| v.to_ascii_lowercase().starts_with("text/event-stream"))
+	{
+		return Ok((resp, false));
+	}
+
+	let (mut parts, body) = resp.into_parts();
+	let encoding = parts.headers.typed_get::<ContentEncoding>();
+	let (mut body, decompressed_encoding) =
+		http::compression::decompress_body(body, encoding.as_ref())
+			.map_err(|e| map_response_compression_error(e, &parts.headers))?;
+	if decompressed_encoding.is_some() {
+		parts.headers.remove(header::CONTENT_ENCODING);
+		parts.headers.remove(header::CONTENT_LENGTH);
+		parts.headers.remove(header::TRANSFER_ENCODING);
+	}
+
+	// Model admission failures may take a few seconds to arrive. The outer request timeout
+	// still wins when configured; this deadline prevents an unbounded wait for a first event.
+	const SNIFF_TIMEOUT: Duration = Duration::from_secs(60);
+	let sniff_deadline = tokio::time::Instant::now() + SNIFF_TIMEOUT;
+	let mut inspector = codex_responses::OverloadStreamInspector::new();
+	let mut prefix = Vec::new();
+	let mut prefix_len = 0usize;
+	let mut overflow = None;
+	let mut trailers = Vec::new();
+	let mut overload = None;
+	while prefix_len < codex_responses::OVERLOAD_PREFIX_LIMIT {
+		let next = match tokio::time::timeout_at(sniff_deadline, body.frame()).await {
+			Ok(next) => next,
+			Err(_) => break,
+		};
+		let Some(frame) = next else { break };
+		let frame = frame.map_err(|e| AIError::ResponseDecoding(axum_core::Error::new(e)))?;
+		let Some(data) = frame.data_ref() else {
+			// SSE trailers do not carry response events, but preserve them after the buffered prefix.
+			trailers.push(frame);
+			continue;
+		};
+		let remaining = codex_responses::OVERLOAD_PREFIX_LIMIT - prefix_len;
+		let take = data.len().min(remaining);
+		let current = data.slice(..take);
+		prefix_len += current.len();
+		prefix.push(current.clone());
+		let disposition = inspector.push(&current);
+		if disposition == codex_responses::StreamEventDisposition::Overloaded {
+			// Recover the complete event from the bounded prefix so clients see the provider's
+			// original error details on the final attempt.
+			let mut decoder = tokio_sse_codec::SseDecoder::<bytes::Bytes>::with_max_size(
+				codex_responses::OVERLOAD_PREFIX_LIMIT,
+			);
+			let mut buffered = BytesMut::new();
+			for chunk in &prefix {
+				buffered.extend_from_slice(chunk);
+			}
+			while let Some(frame) = decoder
+				.decode(&mut buffered)
+				.map_err(|_| AIError::InvalidResponse("invalid Codex SSE response".into()))?
+			{
+				if let tokio_sse_codec::Frame::Event(event) = frame
+					&& let Ok(value) = serde_json::from_slice::<serde_json::Value>(&event.data)
+					&& let Some(error) = codex_responses::overload_error_named(Some(&event.name), &value)
+				{
+					overload = Some(error);
+					break;
+				}
+			}
+			break;
+		}
+		if disposition == codex_responses::StreamEventDisposition::OutputStarted {
+			break;
+		}
+		if take < data.len() {
+			overflow = Some(data.slice(take..));
+			break;
+		}
+	}
+
+	if let Some(error) = overload {
+		parts.status = http::StatusCode::SERVICE_UNAVAILABLE;
+		parts.headers.insert(
+			header::CONTENT_TYPE,
+			HeaderValue::from_static("application/json"),
+		);
+		parts.headers.remove(header::CONTENT_LENGTH);
+		return Ok((
+			Response::from_parts(
+				parts,
+				Body::from(serde_json::json!({"error": error}).to_string()),
+			),
+			true,
+		));
+	}
+
+	let mut prefix_frames: std::collections::VecDeque<_> = prefix
+		.into_iter()
+		.chain(overflow)
+		.map(http_body::Frame::data)
+		.collect();
+	prefix_frames.extend(trailers);
+	Ok((
+		Response::from_parts(
+			parts,
+			Body::new(PrefixFramesBody {
+				prefix: prefix_frames,
+				inner: body,
+			}),
+		),
+		false,
+	))
+}
+
 #[derive(Debug, Clone, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AIBackend {
@@ -2298,12 +2465,19 @@ impl AIProvider {
 		log: AsyncLog<llm::LLMInfo>,
 		log_content: LogContentFields,
 		model_catalog: Option<&Arc<catalog::ModelCatalog>>,
-		resp: Response,
+		mut resp: Response,
 	) -> Result<Response, AIError> {
 		// Non-success responses are plain JSON, not event-stream data.
 		// Only enter the streaming path for successful responses; errors
 		// fall through to the buffered path where process_error translates them.
 		if req.streaming && resp.status().is_success() {
+			if matches!(self, AIProvider::CodexSubscription(_)) {
+				let (inspected, overloaded) = inspect_codex_overload_prefix(resp).await?;
+				resp = inspected;
+				if overloaded {
+					return Ok(resp);
+				}
+			}
 			return self.process_streaming(
 				client,
 				req,
@@ -3261,5 +3435,104 @@ impl agent_llm::StreamingUsageReporter for AmendOnDrop {
 impl Drop for AmendOnDrop {
 	fn drop(&mut self) {
 		self.report_usage();
+	}
+}
+
+#[cfg(test)]
+mod codex_overload_prefix_tests {
+	use bytes::Bytes;
+	use http_body_util::BodyExt;
+
+	use super::*;
+
+	fn streaming_response(chunks: Vec<&'static [u8]>) -> Response {
+		let body = Body::from_stream(futures_util::stream::iter(
+			chunks
+				.into_iter()
+				.map(|chunk| Ok::<_, std::io::Error>(Bytes::from_static(chunk))),
+		));
+		::http::Response::builder()
+			.status(http::StatusCode::OK)
+			.header(header::CONTENT_TYPE, "text/event-stream")
+			.body(body)
+			.unwrap()
+	}
+
+	#[tokio::test]
+	async fn empty_prelude_and_split_response_failed_overload_become_503() {
+		let response = streaming_response(vec![
+			b": keepalive\n\n",
+			b"event: response.created\ndata: {\"type\":\"response.created\"}\n\n",
+			b"event: response.failed\ndata: {\"type\":\"response.failed\",\"response\":{\"error\":{\"code\":\"server_is_",
+			b"overloaded\",\"message\":\"busy\"}}}\n\n",
+		]);
+		let (response, overloaded) = inspect_codex_overload_prefix(response).await.unwrap();
+		assert!(overloaded);
+		assert_eq!(response.status(), http::StatusCode::SERVICE_UNAVAILABLE);
+		assert_eq!(response.headers()[header::CONTENT_TYPE], "application/json");
+		let body = response.into_body().collect().await.unwrap().to_bytes();
+		let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
+		assert_eq!(value["error"]["code"], "server_is_overloaded");
+		assert_eq!(value["error"]["message"], "busy");
+	}
+
+	#[tokio::test]
+	async fn text_tool_and_reasoning_output_prevent_replay_after_later_overload() {
+		for output_event in [
+			b"data: {\"type\":\"response.output_text.delta\",\"delta\":\"hello\"}\n\n".as_slice(),
+			b"data: {\"type\":\"response.output_item.added\",\"item\":{\"type\":\"function_call\",\"name\":\"lookup\"}}\n\n".as_slice(),
+			b"data: {\"type\":\"response.reasoning_summary_text.delta\",\"delta\":\"thinking\"}\n\n".as_slice(),
+		] {
+			let response = streaming_response(vec![
+				output_event,
+				b"event: error\ndata: {\"type\":\"error\",\"error\":{\"code\":\"server_is_overloaded\"}}\n\n",
+			]);
+			let (response, overloaded) = inspect_codex_overload_prefix(response).await.unwrap();
+			assert!(!overloaded);
+			assert_eq!(response.status(), http::StatusCode::OK);
+			let body = response.into_body().collect().await.unwrap().to_bytes();
+			assert_eq!(body.as_ref(), [output_event, b"event: error\ndata: {\"type\":\"error\",\"error\":{\"code\":\"server_is_overloaded\"}}\n\n"].concat());
+		}
+	}
+
+	#[tokio::test]
+	async fn event_error_overload_is_promoted_but_other_errors_are_unchanged() {
+		let overloaded = streaming_response(vec![
+			b"event: error\ndata: {\"type\":\"error\",\"error\":{\"code\":\"server_is_overloaded\",\"message\":\"busy\"}}\n\n",
+		]);
+		let (response, was_overloaded) = inspect_codex_overload_prefix(overloaded).await.unwrap();
+		assert!(was_overloaded);
+		assert_eq!(response.status(), http::StatusCode::SERVICE_UNAVAILABLE);
+
+		let ordinary = streaming_response(vec![
+			b"event: error\ndata: {\"type\":\"error\",\"error\":{\"code\":\"invalid_request\"}}\n\n",
+		]);
+		let (response, was_overloaded) = inspect_codex_overload_prefix(ordinary).await.unwrap();
+		assert!(!was_overloaded);
+		assert_eq!(response.status(), http::StatusCode::OK);
+		let body = response.into_body().collect().await.unwrap().to_bytes();
+		assert!(
+			std::str::from_utf8(&body)
+				.unwrap()
+				.contains("invalid_request")
+		);
+	}
+
+	#[tokio::test]
+	async fn delayed_pre_output_overload_is_still_promoted() {
+		let body = Body::from_stream(futures_util::stream::once(async {
+			tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+			Ok::<_, std::io::Error>(Bytes::from_static(
+				b"event: error\ndata: {\"type\":\"error\",\"error\":{\"code\":\"server_is_overloaded\"}}\n\n",
+			))
+		}));
+		let response = ::http::Response::builder()
+			.status(http::StatusCode::OK)
+			.header(header::CONTENT_TYPE, "text/event-stream")
+			.body(body)
+			.unwrap();
+		let (response, overloaded) = inspect_codex_overload_prefix(response).await.unwrap();
+		assert!(overloaded);
+		assert_eq!(response.status(), http::StatusCode::SERVICE_UNAVAILABLE);
 	}
 }

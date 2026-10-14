@@ -391,6 +391,67 @@ fn codex_completion_sse() -> String {
 }
 
 #[tokio::test]
+async fn llm_codex_responses_promotes_only_pre_output_overload_sse() {
+	for (upstream_body, expected_status) in [
+		(
+			"event: error\ndata: {\"type\":\"error\",\"error\":{\"code\":\"server_is_overloaded\",\"message\":\"busy\"}}\n\n",
+			StatusCode::SERVICE_UNAVAILABLE,
+		),
+		(
+			"event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"hello\"}\n\nevent: error\ndata: {\"type\":\"error\",\"error\":{\"code\":\"server_is_overloaded\",\"message\":\"busy\"}}\n\n",
+			StatusCode::OK,
+		),
+	] {
+		let mock = MockServer::start().await;
+		Mock::given(wiremock::matchers::method("GET"))
+			.respond_with(ResponseTemplate::new(200).set_body_json(
+				json!({"models": [{"slug": "gpt-5.6-luna", "visibility": "list", "supported_in_api": true}]}),
+			))
+			.mount(&mock)
+			.await;
+		Mock::given(wiremock::matchers::method("POST"))
+			.respond_with(ResponseTemplate::new(200).set_body_raw(upstream_body, "text/event-stream"))
+			.mount(&mock)
+			.await;
+		let mut provider = llm_named_provider(
+			&mock,
+			AIProvider::CodexSubscription(codex_subscription::Provider {
+				refresh_interval: Duration::from_secs(60),
+				stale_while_revalidate: Duration::from_secs(60),
+				allow_models: vec!["*".into()],
+				deny_models: vec![],
+			}),
+			false,
+		);
+		provider.path_prefix = Some(codex_subscription::DEFAULT_BASE_PATH.into());
+		let (_mock, _bind, io) = setup_llm_named_provider_mock(mock, provider, "{}");
+		let response = RequestBuilder::new(Method::POST, "http://lo/v1/responses")
+			.body(Body::from(
+				json!({"model": "openai/gpt-5.6-luna", "input": "Hello", "stream": true}).to_string(),
+			))
+			.send(io)
+			.await
+			.unwrap();
+		assert_eq!(response.status(), expected_status);
+		let content_type = response.headers()["content-type"]
+			.to_str()
+			.unwrap()
+			.to_owned();
+		let body = read_body_raw(response.into_body()).await;
+		if expected_status == StatusCode::SERVICE_UNAVAILABLE {
+			assert!(content_type.starts_with("application/json"));
+			let body: Value = serde_json::from_slice(&body).unwrap();
+			assert_eq!(body["error"]["code"], "server_is_overloaded");
+		} else {
+			assert!(content_type.starts_with("text/event-stream"));
+			let body = String::from_utf8(body.to_vec()).unwrap();
+			assert!(body.contains("response.output_text.delta"));
+			assert!(body.contains("server_is_overloaded"));
+		}
+	}
+}
+
+#[tokio::test]
 async fn llm_codex_subscription_completions_facade_and_openai_isolation() {
 	for codex in [true, false] {
 		for streaming in [false, true] {
