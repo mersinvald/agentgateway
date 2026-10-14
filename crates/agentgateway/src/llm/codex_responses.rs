@@ -7,6 +7,105 @@ use tokio_util::codec::Decoder;
 
 use super::{AIError, BufferedResponse};
 
+/// Maximum amount of an initial Codex SSE stream that may be held while looking for an
+/// overload error. Once this limit is reached, the stream is forwarded as-is.
+pub(super) const OVERLOAD_PREFIX_LIMIT: usize = 64 * 1024;
+
+/// A complete Responses event can be classified without consuming the rest of the stream.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum StreamEventDisposition {
+	Continue,
+	OutputStarted,
+	Overloaded,
+}
+
+fn classify_named_stream_event(event_name: Option<&str>, data: &[u8]) -> StreamEventDisposition {
+	if data.is_empty() {
+		return StreamEventDisposition::Continue;
+	}
+	if data == b"[DONE]" {
+		return StreamEventDisposition::OutputStarted;
+	}
+	let Ok(event) = serde_json::from_slice::<Value>(data) else {
+		// Malformed or future data cannot be assumed to be harmless prelude. Forward it and
+		// let the normal translator handle the stream without risking a replay.
+		return StreamEventDisposition::OutputStarted;
+	};
+	let event_type = event
+		.get("type")
+		.and_then(Value::as_str)
+		.or(event_name)
+		.unwrap_or_default();
+	if overload_error_named(event_name, &event).is_some() {
+		StreamEventDisposition::Overloaded
+	} else if matches!(
+		event_type,
+		"response.created" | "response.in_progress" | "response.queued"
+	) {
+		StreamEventDisposition::Continue
+	} else {
+		// Only documented lifecycle prelude events are safe to wait through. All output,
+		// terminal, unknown, or future event types end lookahead so later errors cannot replay.
+		StreamEventDisposition::OutputStarted
+	}
+}
+
+pub(super) fn overload_error_named(event_name: Option<&str>, event: &Value) -> Option<Value> {
+	let event_type = event.get("type").and_then(Value::as_str).or(event_name)?;
+	let error = match event_type {
+		"error" => event.get("error").unwrap_or(event),
+		"response.failed" => event
+			.get("response")
+			.and_then(|r| r.get("error"))
+			.unwrap_or(event),
+		_ => return None,
+	};
+	(error.get("code").and_then(Value::as_str) == Some("server_is_overloaded")).then(|| error.clone())
+}
+
+/// Incrementally decodes complete SSE events while retaining the raw prefix for replay into
+/// the normal streaming translator. The caller stops reading as soon as output or overload
+/// is seen, or when the prefix limit is reached.
+pub(super) struct OverloadStreamInspector {
+	decoder: SseDecoder<Bytes>,
+	buffer: BytesMut,
+	decision: Option<StreamEventDisposition>,
+}
+
+impl OverloadStreamInspector {
+	pub(super) fn new() -> Self {
+		Self {
+			decoder: SseDecoder::with_max_size(OVERLOAD_PREFIX_LIMIT),
+			buffer: BytesMut::new(),
+			decision: None,
+		}
+	}
+
+	pub(super) fn push(&mut self, bytes: &[u8]) -> StreamEventDisposition {
+		if let Some(decision) = self.decision {
+			return decision;
+		}
+		self.buffer.extend_from_slice(bytes);
+		loop {
+			match self.decoder.decode(&mut self.buffer) {
+				Ok(Some(Frame::Event(event))) => {
+					let disposition = classify_named_stream_event(Some(&event.name), &event.data);
+					if disposition != StreamEventDisposition::Continue {
+						self.decision = Some(disposition);
+						return disposition;
+					}
+				},
+				Ok(Some(_)) => continue,
+				Ok(None) => return StreamEventDisposition::Continue,
+				Err(_) => {
+					self.decision = Some(StreamEventDisposition::OutputStarted);
+					return StreamEventDisposition::OutputStarted;
+				},
+			}
+		}
+	}
+}
+
 /// Apply subscription-only constraints after translation and policy overrides. Do not use an
 /// allowlist: Codex supports Responses tools, images, reasoning, text and stream controls, and
 /// new fields must be able to pass through without waiting for a gateway schema update.
@@ -327,6 +426,73 @@ mod tests {
 		assert_eq!(
 			serde_json::from_slice::<Value>(&buffered.bytes).unwrap()["error"]["code"],
 			"server_error"
+		);
+	}
+
+	#[test]
+	fn overload_inspector_waits_through_empty_prelude_and_split_chunks() {
+		let mut inspector = OverloadStreamInspector::new();
+		assert_eq!(
+			inspector
+				.push(b": keepalive\n\nevent: response.created\ndata: {\"type\":\"response.created\"}\n\n"),
+			StreamEventDisposition::Continue
+		);
+		assert_eq!(
+			inspector.push(b"event: error\ndata: {\"type\":\"error\",\"error\":{\"code\":"),
+			StreamEventDisposition::Continue
+		);
+		assert_eq!(
+			inspector.push(b"\"server_is_overloaded\",\"message\":\"busy\"}}\n\n"),
+			StreamEventDisposition::Overloaded
+		);
+
+		let mut named_error = OverloadStreamInspector::new();
+		assert_eq!(
+			named_error.push(b"event: error\ndata: {\"error\":{\"code\":\"server_is_overloaded\"}}\n\n"),
+			StreamEventDisposition::Overloaded
+		);
+	}
+
+	#[test]
+	fn tool_output_and_later_overload_are_not_retryable() {
+		let mut inspector = OverloadStreamInspector::new();
+		assert_eq!(
+			inspector.push(b"data: {\"type\":\"response.output_item.added\",\"item\":{\"type\":\"function_call\",\"name\":\"lookup\"}}\n\n"),
+			StreamEventDisposition::OutputStarted
+		);
+		assert_eq!(
+			inspector
+				.push(b"data: {\"type\":\"error\",\"error\":{\"code\":\"server_is_overloaded\"}}\n\n"),
+			StreamEventDisposition::OutputStarted
+		);
+	}
+
+	#[test]
+	fn terminal_and_unknown_events_end_lookahead() {
+		for data in [
+			br#"{"type":"response.completed"}"#.as_slice(),
+			br#"{"type":"response.future_output_type"}"#.as_slice(),
+			b"[DONE]".as_slice(),
+			b"not-json".as_slice(),
+		] {
+			assert_eq!(
+				classify_named_stream_event(None, data),
+				StreamEventDisposition::OutputStarted
+			);
+		}
+		assert_eq!(
+			classify_named_stream_event(
+				None,
+				br#"{"type":"response.failed","response":{"error":{"code":"invalid_request"}}}"#
+			),
+			StreamEventDisposition::OutputStarted
+		);
+		let mut inspector = OverloadStreamInspector::new();
+		let mut oversized = b"data: ".to_vec();
+		oversized.extend(vec![b'x'; OVERLOAD_PREFIX_LIMIT]);
+		assert_eq!(
+			inspector.push(&oversized),
+			StreamEventDisposition::OutputStarted
 		);
 	}
 }
